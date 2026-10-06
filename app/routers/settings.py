@@ -41,6 +41,25 @@ def update_settings(data: SettingsUpdate):
     if data.anthropic_model is not None:
         settings.ANTHROPIC_MODEL = data.anthropic_model
 
+    # Persist to .env
+    try:
+        env_lines = [
+            f"AI_PROVIDER={settings.AI_PROVIDER}\n",
+            f"OPENAI_API_KEY={settings.OPENAI_API_KEY}\n",
+            f"OPENAI_MODEL={settings.OPENAI_MODEL}\n",
+            f"GEMINI_API_KEY={settings.GEMINI_API_KEY}\n",
+            f"GEMINI_MODEL={settings.GEMINI_MODEL}\n",
+            f"ANTHROPIC_API_KEY={settings.ANTHROPIC_API_KEY}\n",
+            f"ANTHROPIC_MODEL={settings.ANTHROPIC_MODEL}\n",
+            f"DATABASE_URL={settings.DATABASE_URL}\n",
+            f"UPLOAD_DIR={settings.UPLOAD_DIR}\n",
+            f"MARKET_DATA_PROVIDER={settings.MARKET_DATA_PROVIDER}\n",
+        ]
+        with open(".env", "w") as f:
+            f.writelines(env_lines)
+    except Exception as e:
+        pass
+
     return get_settings()
 
 @router.post("/test-connection")

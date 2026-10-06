@@ -13,7 +13,56 @@ logger = logging.getLogger(__name__)
 class GeminiProvider(AIVisionProvider):
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or settings.GEMINI_API_KEY
-        self.model = model or settings.GEMINI_MODEL or "gemini-1.5-pro"
+        self.model = model or settings.GEMINI_MODEL or "gemini-1.5-flash"
+
+    async def get_working_model(self, client: httpx.AsyncClient) -> str:
+        """
+        Dynamically query Gemini ListModels API to find the best available model for this key.
+        """
+        candidate_preference = [
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro-latest",
+            "gemini-2.0-flash-exp",
+            "gemini-pro-vision",
+            "gemini-pro"
+        ]
+
+        try:
+            list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.api_key}"
+            resp = await client.get(list_url, timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                available = []
+                for m in data.get("models", []):
+                    methods = m.get("supportedGenerationMethods", [])
+                    if "generateContent" in methods:
+                        m_name = m.get("name", "").replace("models/", "")
+                        available.append(m_name)
+
+                logger.info(f"Available Gemini models for key: {available}")
+
+                # 1. If currently configured model is directly available, use it
+                clean_curr = self.model.replace("models/", "")
+                if clean_curr in available:
+                    return clean_curr
+
+                # 2. Pick best preference from available
+                for pref in candidate_preference:
+                    if pref in available:
+                        logger.info(f"Selecting best available Gemini model: {pref}")
+                        return pref
+
+                # 3. If any model supports generateContent, pick the first
+                if available:
+                    return available[0]
+        except Exception as e:
+            logger.warning(f"Could not list Gemini models: {e}")
+
+        # Default fallback
+        return self.model.replace("models/", "")
 
     async def analyze_chart(
         self,
@@ -33,22 +82,23 @@ class GeminiProvider(AIVisionProvider):
                     f"Timeframes: {', '.join(timeframes)}\n"
                     f"Market Info: {json.dumps(market_info)}\n"
                     f"Notes: {notes or 'None'}\n"
-                    "Output strictly valid JSON only."
+                    "Output strictly valid JSON only matching the schema."
         })
 
         for path in image_paths:
-            try:
-                with open(path, "rb") as img_f:
-                    data = base64.b64encode(img_f.read()).decode("utf-8")
-                mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
-                parts.append({
-                    "inline_data": {
-                        "mime_type": mime,
-                        "data": data
-                    }
-                })
-            except Exception as e:
-                logger.error(f"Failed to read image at {path}: {e}")
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as img_f:
+                        data = base64.b64encode(img_f.read()).decode("utf-8")
+                    mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": mime,
+                            "data": data
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to read image at {path}: {e}")
 
         payload = {
             "contents": [{"parts": parts}],
@@ -58,13 +108,37 @@ class GeminiProvider(AIVisionProvider):
             }
         }
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                raise RuntimeError(f"Gemini API error ({resp.status_code}): {resp.text}")
+            # Dynamically resolve working model
+            model_to_use = await self.get_working_model(client)
 
-            res_json = resp.json()
-            candidate = res_json["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(candidate)
+            # Try v1beta first, fallback to v1 if needed
+            endpoints = [
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_to_use}:generateContent?key={self.api_key}",
+                f"https://generativelanguage.googleapis.com/v1/models/{model_to_use}:generateContent?key={self.api_key}"
+            ]
+
+            last_error = None
+            for url in endpoints:
+                try:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        res_json = resp.json()
+                        candidates = res_json.get("candidates", [])
+                        if candidates and "content" in candidates[0]:
+                            parts_out = candidates[0]["content"].get("parts", [])
+                            if parts_out and "text" in parts_out[0]:
+                                text_val = parts_out[0]["text"].strip()
+                                if text_val.startswith("```json"):
+                                    text_val = text_val[7:]
+                                if text_val.startswith("```"):
+                                    text_val = text_val[3:]
+                                if text_val.endswith("```"):
+                                    text_val = text_val[:-3]
+                                return json.loads(text_val.strip())
+                    else:
+                        last_error = f"Gemini API error ({resp.status_code}) on model '{model_to_use}': {resp.text}"
+                except Exception as ex:
+                    last_error = str(ex)
+
+            raise RuntimeError(last_error or "Failed to generate content from Gemini API")
