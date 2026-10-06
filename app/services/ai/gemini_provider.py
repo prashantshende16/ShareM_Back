@@ -1,3 +1,4 @@
+import os
 import base64
 import json
 import logging
@@ -13,21 +14,21 @@ logger = logging.getLogger(__name__)
 class GeminiProvider(AIVisionProvider):
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or settings.GEMINI_API_KEY
-        self.model = model or settings.GEMINI_MODEL or "gemini-1.5-flash"
+        self.model = model or settings.GEMINI_MODEL or "gemini-3.8-flash"
 
     async def get_working_model(self, client: httpx.AsyncClient) -> str:
         """
         Dynamically query Gemini ListModels API to find the best available model for this key.
         """
         candidate_preference = [
-            "gemini-1.5-flash",
+            "gemini-3.8-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.7-flash",
+            "gemini-flash-latest",
             "gemini-2.0-flash",
+            "gemini-1.5-flash",
             "gemini-1.5-pro",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-pro-latest",
-            "gemini-2.0-flash-exp",
-            "gemini-pro-vision",
-            "gemini-pro"
         ]
 
         try:
@@ -109,36 +110,38 @@ class GeminiProvider(AIVisionProvider):
         }
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            # Dynamically resolve working model
             model_to_use = await self.get_working_model(client)
-
-            # Try v1beta first, fallback to v1 if needed
-            endpoints = [
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model_to_use}:generateContent?key={self.api_key}",
-                f"https://generativelanguage.googleapis.com/v1/models/{model_to_use}:generateContent?key={self.api_key}"
-            ]
+            candidate_models = [model_to_use]
+            for m in ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"]:
+                if m not in candidate_models:
+                    candidate_models.append(m)
 
             last_error = None
-            for url in endpoints:
-                try:
-                    resp = await client.post(url, json=payload)
-                    if resp.status_code == 200:
-                        res_json = resp.json()
-                        candidates = res_json.get("candidates", [])
-                        if candidates and "content" in candidates[0]:
-                            parts_out = candidates[0]["content"].get("parts", [])
-                            if parts_out and "text" in parts_out[0]:
-                                text_val = parts_out[0]["text"].strip()
-                                if text_val.startswith("```json"):
-                                    text_val = text_val[7:]
-                                if text_val.startswith("```"):
-                                    text_val = text_val[3:]
-                                if text_val.endswith("```"):
-                                    text_val = text_val[:-3]
-                                return json.loads(text_val.strip())
-                    else:
-                        last_error = f"Gemini API error ({resp.status_code}) on model '{model_to_use}': {resp.text}"
-                except Exception as ex:
-                    last_error = str(ex)
+            for m_candidate in candidate_models:
+                endpoints = [
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{m_candidate}:generateContent?key={self.api_key}",
+                    f"https://generativelanguage.googleapis.com/v1/models/{m_candidate}:generateContent?key={self.api_key}"
+                ]
+                for url in endpoints:
+                    try:
+                        resp = await client.post(url, json=payload)
+                        if resp.status_code == 200:
+                            res_json = resp.json()
+                            candidates = res_json.get("candidates", [])
+                            if candidates and "content" in candidates[0]:
+                                parts_out = candidates[0]["content"].get("parts", [])
+                                if parts_out and "text" in parts_out[0]:
+                                    text_val = parts_out[0]["text"].strip()
+                                    if text_val.startswith("```json"):
+                                        text_val = text_val[7:]
+                                    if text_val.startswith("```"):
+                                        text_val = text_val[3:]
+                                    if text_val.endswith("```"):
+                                        text_val = text_val[:-3]
+                                    return json.loads(text_val.strip())
+                        else:
+                            last_error = f"Gemini API error ({resp.status_code}) on model '{m_candidate}': {resp.text}"
+                    except Exception as ex:
+                        last_error = str(ex)
 
             raise RuntimeError(last_error or "Failed to generate content from Gemini API")
