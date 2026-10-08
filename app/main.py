@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.database import engine, Base
 from app import models
-from app.routers import analyses, screenshots, watchlist, settings as settings_router
+from app.routers import analyses, screenshots, watchlist, settings as settings_router, market
 from app.utils.file_upload import ensure_upload_dir
 
 # Ensure database tables exist
@@ -38,6 +38,7 @@ app.include_router(analyses.router, prefix=settings.API_V1_PREFIX)
 app.include_router(screenshots.router, prefix=settings.API_V1_PREFIX)
 app.include_router(watchlist.router, prefix=settings.API_V1_PREFIX)
 app.include_router(settings_router.router, prefix=settings.API_V1_PREFIX)
+app.include_router(market.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 @app.get(f"{settings.API_V1_PREFIX}/health")
