@@ -51,6 +51,37 @@ def get_live_timeframes(symbol: str = Query(default="NIFTY 50")):
         "data": data
     }
 
+@router.get("/option-signal")
+def get_option_indicator_signal(symbol: str = Query(default="NIFTY 50")):
+    """
+    Dedicated 5-Minute Option Indicator Decision Endpoint.
+    Evaluates 5-Minute candles with:
+    - Candlestick patterns (Hammer, Shooting Star, Engulfing, Morning/Evening Star, Pinbars)
+    - EMA 9/21 Ribbon
+    - RSI 14 Momentum
+    - VWAP Alignment
+    - Volume Spikes
+    Returns definitive 5-Min BUY CALL (CE) / BUY PUT (PE) / WAIT decision, strike recommendation, SL & Targets.
+    """
+    from app.services.technical_analysis.option_indicator import OptionSignalIndicator
+    
+    yf_sym = LiveMarketService.resolve_symbol(symbol)
+    data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="5d")
+    if not data or not data.get("candles"):
+        # Fallback to 1d
+        data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="1d")
+        
+    candles = data.get("candles", []) if data else []
+    cmp = data.get("current_price") if data else None
+    signal = OptionSignalIndicator.evaluate_5m_option_signal(candles, cmp)
+    
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "yf_symbol": yf_sym,
+        "signal": signal
+    }
+
 @router.post("/analyze-live")
 async def analyze_live_market(
     payload: LiveAnalysisRequest,

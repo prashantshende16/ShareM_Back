@@ -79,6 +79,20 @@ class ChartAnalyzer:
                 market_info=market_info
             )
 
+            # 4.1 Enhance trade setup with 5-Minute Option Indicator
+            from app.services.technical_analysis.option_indicator import OptionSignalIndicator
+            from app.services.market_data.live_market_service import LiveMarketService
+            try:
+                yf_sym = LiveMarketService.resolve_symbol(analysis.symbol)
+                c_data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="5d")
+                if not c_data or not c_data.get("candles"):
+                    c_data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="1d")
+                candles_5m = c_data.get("candles", []) if c_data else []
+                option_signal = OptionSignalIndicator.evaluate_5m_option_signal(candles_5m, cmp)
+                risk_eval["trade_setup"]["option_indicator_5m"] = option_signal
+            except Exception as e:
+                logger.warning(f"Could not compute 5m option indicator for {analysis.symbol}: {e}")
+
             # Remove existing results/scenarios if re-running
             db.query(AnalysisResult).filter(AnalysisResult.analysis_id == analysis_id).delete()
             db.query(ScenarioPrediction).filter(ScenarioPrediction.analysis_id == analysis_id).delete()
