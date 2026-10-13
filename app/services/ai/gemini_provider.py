@@ -21,14 +21,12 @@ class GeminiProvider(AIVisionProvider):
         Dynamically query Gemini ListModels API to find the best available model for this key.
         """
         candidate_preference = [
-            "gemini-3.8-flash",
             "gemini-3.6-flash",
-            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash",
             "gemini-3.7-flash",
+            "gemini-3.5-flash",
             "gemini-flash-latest",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
         ]
 
         try:
@@ -112,7 +110,7 @@ class GeminiProvider(AIVisionProvider):
         async with httpx.AsyncClient(timeout=60.0) as client:
             model_to_use = await self.get_working_model(client)
             candidate_models = [model_to_use]
-            for m in ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash"]:
+            for m in ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.7-flash"]:
                 if m not in candidate_models:
                     candidate_models.append(m)
 
