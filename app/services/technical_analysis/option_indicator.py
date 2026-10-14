@@ -1,5 +1,7 @@
 from typing import List, Dict, Any, Optional
 import math
+from datetime import datetime, timedelta
+import pytz
 
 class OptionSignalIndicator:
     """
@@ -308,6 +310,28 @@ class OptionSignalIndicator:
                 f"Wait for clear breakout above {round(current_price + sl_points, 1)} or breakdown below {round(current_price - sl_points, 1)}."
             )
 
+        # Current Indian Standard Time (IST) timestamp
+        try:
+            ist = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(ist)
+        except Exception:
+            now_ist = datetime.utcnow()
+
+        generated_at_str = now_ist.strftime("%I:%M:%S %p")
+        generated_at_iso = now_ist.isoformat()
+        valid_until_dt = now_ist + timedelta(minutes=30)
+        valid_until_str = valid_until_dt.strftime("%I:%M:%S %p")
+
+        # Extract last 5m candle timestamp if available
+        last_candle_epoch = candles[-1].get("time") if candles else None
+        last_candle_time_str = None
+        if last_candle_epoch:
+            try:
+                c_dt = datetime.fromtimestamp(last_candle_epoch, tz=pytz.timezone("Asia/Kolkata"))
+                last_candle_time_str = c_dt.strftime("%I:%M %p")
+            except Exception:
+                pass
+
         return {
             "decision": decision,
             "direction": direction,
@@ -322,6 +346,10 @@ class OptionSignalIndicator:
             "risk_reward": f"1 : {round(t1_points / sl_points, 1)}",
             "timeframe": "5 Minute",
             "expected_holding_time": "15 to 30 Minutes",
+            "generated_at": generated_at_str,
+            "generated_at_iso": generated_at_iso,
+            "valid_until": valid_until_str,
+            "last_candle_time": last_candle_time_str or generated_at_str,
             "patterns_detected": [p["name"] for p in detected_patterns],
             "indicators": {
                 "ema_9": round(cur_ema9, 2),
