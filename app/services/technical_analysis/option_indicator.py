@@ -265,10 +265,45 @@ class OptionSignalIndicator:
         strike_step = 50 if current_price < 30000 else 100
         atm_strike = int(round(current_price / strike_step) * strike_step)
 
-        # SL and Target distances based on Average True Range or percentage (approx 0.2% - 0.35% for 5m options)
+        # SL and Target distances on Index Spot (approx 0.2% - 0.35% for 5m options)
         sl_points = max(15.0, round(current_price * 0.0022, 1))
         t1_points = round(sl_points * 1.8, 1)
         t2_points = round(sl_points * 2.8, 1)
+
+        # -------------------------------------------------------------
+        # OPTION PREMIUM ESTIMATION (In Rupees ₹, what is bought on broker)
+        # Using Delta ~ 0.50 (ATM) and average weekly ATM volatility/theta
+        # -------------------------------------------------------------
+        delta = 0.52  # Standard ATM delta
+        # Typical ATM premium for Nifty ~ 110-140, BankNifty ~ 250-380
+        if current_price < 30000:
+            base_prem = round(max(70.0, min(180.0, current_price * 0.0055)), 1)
+        else:
+            base_prem = round(max(180.0, min(450.0, current_price * 0.0055)), 1)
+
+        prem_entry_low = round(base_prem - 3.0, 1)
+        prem_entry_high = round(base_prem + 3.0, 1)
+        # Premium SL in rupees based on Index SL * Delta
+        prem_sl_diff = round(sl_points * delta, 1)
+        prem_sl = max(5.0, round(base_prem - prem_sl_diff, 1))
+        # Premium Targets in rupees based on Index Target * Delta
+        prem_t1 = round(base_prem + (t1_points * delta), 1)
+        prem_t2 = round(base_prem + (t2_points * delta), 1)
+
+        # Calculate upcoming active Thursday weekly expiry
+        try:
+            ist = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(ist)
+        except Exception:
+            now_ist = datetime.utcnow()
+
+        days_ahead = (3 - now_ist.weekday()) % 7  # 3 = Thursday
+        if days_ahead == 0 and now_ist.hour >= 15:
+            days_ahead = 7
+        elif days_ahead == 0:
+            days_ahead = 0  # Today is expiry Thursday
+        active_expiry_dt = now_ist + timedelta(days=days_ahead)
+        active_expiry_str = active_expiry_dt.strftime("%d %b %Y")
 
         if call_score >= put_score + 20 and call_pct >= 60:
             decision = "BUY CALL (CE)"
@@ -279,9 +314,9 @@ class OptionSignalIndicator:
             target_1 = round(current_price + t1_points, 1)
             target_2 = round(current_price + t2_points, 1)
             summary = (
-                f"High-Probability 5-Minute CALL setup for {strike_suggest}. "
-                f"Bullish confluence driven by EMA ribbon alignment, price holding above VWAP, "
-                f"and favorable candlestick price action."
+                f"High-Probability 5-Minute CALL setup for {strike_suggest} ({active_expiry_str} Expiry). "
+                f"Buy Option Premium around ₹{prem_entry_low} - ₹{prem_entry_high} when Nifty spot holds above {round(current_price, 1)}. "
+                f"Set Option Premium SL at ₹{prem_sl} (Spot SL: {stop_loss})."
             )
         elif put_score >= call_score + 20 and put_pct >= 60:
             decision = "BUY PUT (PE)"
@@ -292,9 +327,9 @@ class OptionSignalIndicator:
             target_1 = round(current_price - t1_points, 1)
             target_2 = round(current_price - t2_points, 1)
             summary = (
-                f"High-Probability 5-Minute PUT setup for {strike_suggest}. "
-                f"Bearish breakdown confluence driven by EMA ribbon rejection, price trading under VWAP, "
-                f"and seller rejection wicks."
+                f"High-Probability 5-Minute PUT setup for {strike_suggest} ({active_expiry_str} Expiry). "
+                f"Buy Option Premium around ₹{prem_entry_low} - ₹{prem_entry_high} when Nifty spot breaks under {round(current_price, 1)}. "
+                f"Set Option Premium SL at ₹{prem_sl} (Spot SL: {stop_loss})."
             )
         else:
             decision = "WAIT / NO TRADE (Range-Bound)"
@@ -309,13 +344,6 @@ class OptionSignalIndicator:
                 f"Indicators are conflicting (Call score: {call_score}, Put score: {put_score}). "
                 f"Wait for clear breakout above {round(current_price + sl_points, 1)} or breakdown below {round(current_price - sl_points, 1)}."
             )
-
-        # Current Indian Standard Time (IST) timestamp
-        try:
-            ist = pytz.timezone("Asia/Kolkata")
-            now_ist = datetime.now(ist)
-        except Exception:
-            now_ist = datetime.utcnow()
 
         generated_at_str = now_ist.strftime("%I:%M:%S %p")
         generated_at_iso = now_ist.isoformat()
@@ -339,6 +367,26 @@ class OptionSignalIndicator:
             "call_score": call_pct,
             "put_score": put_pct,
             "strike_suggestion": strike_suggest,
+            "active_expiry": active_expiry_str,
+            # Option Premium (₹ Rupees Price traded on broker)
+            "option_premium": {
+                "buy_range": f"₹{prem_entry_low} - ₹{prem_entry_high}",
+                "stop_loss": f"₹{prem_sl}",
+                "target_1": f"₹{prem_t1}",
+                "target_2": f"₹{prem_t2}",
+                "risk_points": f"₹{prem_sl_diff} pts",
+                "reward_points": f"₹{round(prem_t1 - base_prem, 1)} pts"
+            },
+            # Underlying Index Spot Levels (Point pivots on chart)
+            "index_spot": {
+                "cmp": round(current_price, 2),
+                "entry_zone": f"{round(current_price - 12, 1)} - {round(current_price + 12, 1)}",
+                "stop_loss": stop_loss,
+                "target_1": target_1,
+                "target_2": target_2,
+                "risk_points": sl_points,
+                "target_points": t1_points
+            },
             "entry_price": round(current_price, 2),
             "stop_loss": stop_loss,
             "target_1": target_1,
