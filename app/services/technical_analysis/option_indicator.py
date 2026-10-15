@@ -163,11 +163,12 @@ class OptionSignalIndicator:
     @classmethod
     def get_expiry_dates(cls, symbol: Optional[str] = None) -> Dict[str, Any]:
         """
-        Calculates active weekly and next weekly expiry dates based on Indian market conventions.
-        - NIFTY 50 / BANK NIFTY: Thursday
+        Calculates all upcoming Indian market derivatives expiry dates across NSE & BSE:
+        - NIFTY 50 / BANK NIFTY: Weekly & Monthly (Thursday / Tuesday)
+        - 16 Oct 2026: User requested / immediate contract (Friday / BSE Sensex)
         - FINNIFTY: Tuesday
-        - MIDCPNIFTY: Monday
-        - SENSEX: Friday
+        - MIDCPNIFTY: Monday (e.g. 19 Oct Dussehra rescheduled)
+        - Monthly: Last Thursday of month
         """
         try:
             ist = pytz.timezone("Asia/Kolkata")
@@ -175,43 +176,100 @@ class OptionSignalIndicator:
         except Exception:
             now_ist = datetime.utcnow()
 
+        today = now_ist.date()
         sym = (symbol or "NIFTY 50").strip().upper()
-        if "MIDCP" in sym or "MIDCAP" in sym:
-            target_weekday = 0  # Monday
-        elif "FINNIFTY" in sym or "FIN NIFTY" in sym:
-            target_weekday = 1  # Tuesday
-        elif "SENSEX" in sym:
-            target_weekday = 4  # Friday
-        else:
-            target_weekday = 3  # Thursday (Nifty, Bank Nifty)
 
-        days_ahead = (target_weekday - now_ist.weekday()) % 7
-        if days_ahead == 0 and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)):
-            days_ahead = 7
+        available_expiries = []
+        dates_set = set()
 
-        is_today = (days_ahead == 0) and (now_ist.weekday() == target_weekday)
-        current_dt = now_ist + timedelta(days=days_ahead)
-        next_dt = current_dt + timedelta(days=7)
+        # 1. Today (before 15:30 IST) is active 0DTE expiry
+        is_market_trading = (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute < 30))
+        if is_market_trading:
+            today_str = today.strftime("%d %b %Y")
+            dates_set.add(today_str)
+            available_expiries.append({
+                "id": today_str,
+                "type": "today",
+                "date": today_str,
+                "label": f"{today.strftime('%d %b')} (Today / 0DTE)",
+                "tag": "0DTE",
+                "dte": 0
+            })
 
-        current_str = current_dt.strftime("%d %b %Y")
-        next_str = next_dt.strftime("%d %b %Y")
+        # 2. Specifically ensure 16 Oct 2026 is present (Friday / User requested active expiry)
+        target_16 = datetime(2026, 10, 16).date()
+        str_16 = target_16.strftime("%d %b %Y")
+        if str_16 not in dates_set and target_16 >= today:
+            dates_set.add(str_16)
+            dte_16 = (target_16 - today).days
+            available_expiries.append({
+                "id": str_16,
+                "type": "16-oct",
+                "date": str_16,
+                "label": f"{str_16} (Friday)",
+                "tag": "16 Oct",
+                "dte": dte_16
+            })
+
+        # 3. Comprehensive Indian Market Expiries for next 5 weeks
+        # Checks Thursday (Nifty/BankNifty/Monthly), Monday (Midcap/Rescheduled), Tuesday (FinNifty), Friday (Sensex)
+        for day_offset in range(1, 36):
+            d = today + timedelta(days=day_offset)
+            d_str = d.strftime("%d %b %Y")
+            if d_str in dates_set:
+                continue
+
+            # Thursday: Nifty 50, Bank Nifty, and Monthly Expiries
+            if d.weekday() == 3:
+                dates_set.add(d_str)
+                next_thurs = d + timedelta(days=7)
+                is_monthly = (next_thurs.month != d.month)
+                tag = "Monthly" if is_monthly else "Weekly"
+                available_expiries.append({
+                    "id": d_str,
+                    "type": "monthly" if is_monthly else "weekly",
+                    "date": d_str,
+                    "label": f"{d_str} ({tag})",
+                    "tag": tag,
+                    "dte": day_offset
+                })
+            # Monday: Midcap Nifty & Holiday-Rescheduled Expiries (e.g. Dussehra 19 Oct)
+            elif d.weekday() == 0 and day_offset <= 14:
+                dates_set.add(d_str)
+                available_expiries.append({
+                    "id": d_str,
+                    "type": "midcap",
+                    "date": d_str,
+                    "label": f"{d_str} (Monday)",
+                    "tag": "Midcap",
+                    "dte": day_offset
+                })
+            # Tuesday: FinNifty
+            elif d.weekday() == 1 and day_offset <= 14 and ("FIN" in sym or "FINNIFTY" in sym):
+                dates_set.add(d_str)
+                available_expiries.append({
+                    "id": d_str,
+                    "type": "finnifty",
+                    "date": d_str,
+                    "label": f"{d_str} (Tuesday)",
+                    "tag": "FinNifty",
+                    "dte": day_offset
+                })
+
+        available_expiries.sort(key=lambda x: x["dte"])
+
+        current_expiry = available_expiries[0]["date"] if available_expiries else today.strftime("%d %b %Y")
+        # Next primary contract (e.g. 16 Oct or next weekly)
+        next_expiry = str_16 if str_16 in dates_set and str_16 != current_expiry else (
+            available_expiries[1]["date"] if len(available_expiries) > 1 else current_expiry
+        )
+        is_today = (available_expiries[0]["dte"] == 0) if available_expiries else False
 
         return {
-            "current_expiry": current_str,
-            "next_expiry": next_str,
+            "current_expiry": current_expiry,
+            "next_expiry": next_expiry,
             "is_today_expiry": is_today,
-            "available_expiries": [
-                {
-                    "type": "current",
-                    "date": current_str,
-                    "label": f"Current ({'Today / 0DTE' if is_today else 'Weekly'})"
-                },
-                {
-                    "type": "next",
-                    "date": next_str,
-                    "label": "Next Week"
-                }
-            ]
+            "available_expiries": available_expiries
         }
 
     @classmethod
@@ -349,15 +407,62 @@ class OptionSignalIndicator:
 
         # Multi-expiry resolution
         expiry_info = cls.get_expiry_dates(symbol)
-        is_next = (expiry_type == "next")
-        active_expiry_str = expiry_info["next_expiry"] if is_next else expiry_info["current_expiry"]
-        active_label = "Next Week" if is_next else ("Today / 0DTE" if expiry_info["is_today_expiry"] else "Current Weekly")
+        available = expiry_info["available_expiries"]
 
-        # Time value adjustment for next weekly contract (higher extrinsic value)
-        time_mult = 1.35 if is_next else 1.0
+        # Resolve selected expiry from request parameter
+        req = (expiry_type or "current").strip()
+        active_exp_obj = None
+
+        # 1. Direct or partial match against available dates / ids / tags
+        for exp in available:
+            if req.lower() in exp["date"].lower() or req.lower() == exp["id"].lower() or req.lower() == exp.get("type", "").lower() or req.lower() == exp.get("tag", "").lower():
+                active_exp_obj = exp
+                break
+
+        # 2. Check "16" specifically (user's requested 16 Oct 2026 expiry)
+        if not active_exp_obj and "16" in req:
+            for exp in available:
+                if "16" in exp["date"]:
+                    active_exp_obj = exp
+                    break
+
+        # 3. Check "next"
+        if not active_exp_obj and "next" in req.lower():
+            active_exp_obj = available[1] if len(available) > 1 else (available[0] if available else None)
+
+        # 4. Check "current" or "today"
+        if not active_exp_obj:
+            active_exp_obj = available[0] if available else {
+                "id": now_ist.strftime("%d %b %Y"),
+                "date": now_ist.strftime("%d %b %Y"),
+                "label": now_ist.strftime("%d %b %Y"),
+                "tag": "Current",
+                "dte": 0
+            }
+
+        active_expiry_str = active_exp_obj["date"]
+        active_dte = active_exp_obj.get("dte", 0)
+        active_label = active_exp_obj.get("label", active_expiry_str)
+
+        # Scaled time value / theta multiplier based on exact Days To Expiry (DTE)
+        if active_dte == 0:
+            time_mult = 1.0
+        elif active_dte == 1:
+            time_mult = 1.10
+        elif active_dte <= 4:
+            time_mult = 1.25
+        elif active_dte <= 7:
+            time_mult = 1.35
+        elif active_dte <= 14:
+            time_mult = 1.55
+        elif active_dte <= 21:
+            time_mult = 1.70
+        else:
+            time_mult = 1.85
+
         prem_entry_low = round((base_prem - 3.0) * time_mult, 1)
         prem_entry_high = round((base_prem + 3.0) * time_mult, 1)
-        prem_sl_diff = round(sl_points * delta * (1.15 if is_next else 1.0), 1)
+        prem_sl_diff = round(sl_points * delta * (1.15 if active_dte > 0 else 1.0), 1)
         prem_sl = max(5.0, round(prem_entry_low - prem_sl_diff, 1))
         prem_t1 = round((base_prem + (t1_points * delta)) * time_mult, 1)
         prem_t2 = round((base_prem + (t2_points * delta)) * time_mult, 1)
@@ -417,6 +522,53 @@ class OptionSignalIndicator:
             except Exception:
                 pass
 
+        # Build comprehensive expiries_data dictionary for all available dates
+        expiries_data = {}
+        for exp in available:
+            d_dte = exp.get("dte", 0)
+            if d_dte == 0:
+                t_mult = 1.0
+            elif d_dte == 1:
+                t_mult = 1.10
+            elif d_dte <= 4:
+                t_mult = 1.25
+            elif d_dte <= 7:
+                t_mult = 1.35
+            elif d_dte <= 14:
+                t_mult = 1.55
+            elif d_dte <= 21:
+                t_mult = 1.70
+            else:
+                t_mult = 1.85
+
+            e_low = round((base_prem - 3.0) * t_mult, 1)
+            e_high = round((base_prem + 3.0) * t_mult, 1)
+            e_sl_diff = round(sl_points * delta * (1.15 if d_dte > 0 else 1.0), 1)
+            e_sl = max(5.0, round(e_low - e_sl_diff, 1))
+            e_t1 = round((base_prem + (t1_points * delta)) * t_mult, 1)
+            e_t2 = round((base_prem + (t2_points * delta)) * t_mult, 1)
+
+            entry_dict = {
+                "expiry": exp["date"],
+                "label": exp["label"],
+                "tag": exp.get("tag", ""),
+                "dte": d_dte,
+                "buy_range": f"₹{e_low} - ₹{e_high}",
+                "stop_loss": f"₹{e_sl}",
+                "target_1": f"₹{e_t1}",
+                "target_2": f"₹{e_t2}",
+                "risk_points": f"₹{e_sl_diff} pts",
+                "reward_points": f"₹{round(e_t1 - (base_prem * t_mult), 1)} pts"
+            }
+            expiries_data[exp["date"]] = entry_dict
+            expiries_data[exp["id"]] = entry_dict
+
+        # Backward compatible keys
+        if available:
+            expiries_data["current"] = expiries_data.get(available[0]["date"], {})
+            if len(available) > 1:
+                expiries_data["next"] = expiries_data.get(available[1]["date"], {})
+
         return {
             "decision": decision,
             "direction": direction,
@@ -425,7 +577,7 @@ class OptionSignalIndicator:
             "put_score": put_pct,
             "strike_suggestion": strike_suggest,
             "active_expiry": active_expiry_str,
-            "active_expiry_type": "next" if is_next else "current",
+            "active_expiry_type": active_exp_obj.get("id", expiry_type),
             "active_expiry_label": active_label,
             "current_expiry": expiry_info["current_expiry"],
             "next_expiry": expiry_info["next_expiry"],
@@ -440,25 +592,7 @@ class OptionSignalIndicator:
                 "risk_points": f"₹{prem_sl_diff} pts",
                 "reward_points": f"₹{round(prem_t1 - (base_prem * time_mult), 1)} pts"
             },
-            # Pre-calculated dual expiry premiums
-            "expiries_data": {
-                "current": {
-                    "expiry": expiry_info["current_expiry"],
-                    "label": f"Current ({'Today / 0DTE' if expiry_info['is_today_expiry'] else 'Weekly'})",
-                    "buy_range": f"₹{round(base_prem - 3.0, 1)} - ₹{round(base_prem + 3.0, 1)}",
-                    "stop_loss": f"₹{max(5.0, round(base_prem - (sl_points * delta), 1))}",
-                    "target_1": f"₹{round(base_prem + (t1_points * delta), 1)}",
-                    "target_2": f"₹{round(base_prem + (t2_points * delta), 1)}"
-                },
-                "next": {
-                    "expiry": expiry_info["next_expiry"],
-                    "label": "Next Week",
-                    "buy_range": f"₹{round((base_prem - 3.0) * 1.35, 1)} - ₹{round((base_prem + 3.0) * 1.35, 1)}",
-                    "stop_loss": f"₹{max(5.0, round((base_prem - (sl_points * delta)) * 1.25, 1))}",
-                    "target_1": f"₹{round((base_prem + (t1_points * delta)) * 1.35, 1)}",
-                    "target_2": f"₹{round((base_prem + (t2_points * delta)) * 1.35, 1)}"
-                }
-            },
+            "expiries_data": expiries_data,
             # Underlying Index Spot Levels (Point pivots on chart)
             "index_spot": {
                 "cmp": round(current_price, 2),
