@@ -13,8 +13,13 @@ logger = logging.getLogger(__name__)
 SYMBOL_MAPPINGS = {
     "NIFTY": "^NSEI",
     "NIFTY 50": "^NSEI",
+    "NIFTY50": "^NSEI",
     "BANKNIFTY": "^NSEBANK",
+    "BANK NIFTY": "^NSEBANK",
     "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
+    "FIN NIFTY": "NIFTY_FIN_SERVICE.NS",
+    "MIDCPNIFTY": "NIFTY_MID_SELECT.NS",
+    "MIDCAP NIFTY": "NIFTY_MID_SELECT.NS",
     "SENSEX": "^BSESN",
     "RELIANCE": "RELIANCE.NS",
     "HDFCBANK": "HDFCBANK.NS",
@@ -64,7 +69,12 @@ class LiveMarketService:
     @staticmethod
     def resolve_symbol(symbol: str) -> str:
         clean = symbol.strip().upper()
-        return SYMBOL_MAPPINGS.get(clean, f"{clean}.NS" if not clean.startswith("^") and not clean.endswith(".NS") else clean)
+        if clean in SYMBOL_MAPPINGS:
+            return SYMBOL_MAPPINGS[clean]
+        no_space = clean.replace(" ", "")
+        if no_space in SYMBOL_MAPPINGS:
+            return SYMBOL_MAPPINGS[no_space]
+        return f"{clean}.NS" if not clean.startswith("^") and not clean.endswith(".NS") else clean
 
     @classmethod
     def get_candle_data(cls, yf_symbol: str, interval: str = "5m", range_: str = "1d") -> Optional[Dict[str, Any]]:

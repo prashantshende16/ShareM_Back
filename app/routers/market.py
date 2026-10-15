@@ -52,7 +52,10 @@ def get_live_timeframes(symbol: str = Query(default="NIFTY 50")):
     }
 
 @router.get("/option-signal")
-def get_option_indicator_signal(symbol: str = Query(default="NIFTY 50")):
+def get_option_indicator_signal(
+    symbol: str = Query(default="NIFTY 50"),
+    expiry_type: str = Query(default="current", description="Expiry preference: 'current' or 'next'")
+):
     """
     Dedicated 5-Minute Option Indicator Decision Endpoint.
     Evaluates 5-Minute candles with:
@@ -62,6 +65,7 @@ def get_option_indicator_signal(symbol: str = Query(default="NIFTY 50")):
     - VWAP Alignment
     - Volume Spikes
     Returns definitive 5-Min BUY CALL (CE) / BUY PUT (PE) / WAIT decision, strike recommendation, SL & Targets.
+    Supports Current Weekly (0DTE) vs Next Weekly contract.
     """
     from app.services.technical_analysis.option_indicator import OptionSignalIndicator
     
@@ -73,12 +77,13 @@ def get_option_indicator_signal(symbol: str = Query(default="NIFTY 50")):
         
     candles = data.get("candles", []) if data else []
     cmp = data.get("current_price") if data else None
-    signal = OptionSignalIndicator.evaluate_5m_option_signal(candles, cmp)
+    signal = OptionSignalIndicator.evaluate_5m_option_signal(candles, cmp, symbol=symbol, expiry_type=expiry_type)
     
     return {
         "status": "success",
         "symbol": symbol,
         "yf_symbol": yf_sym,
+        "expiry_type": expiry_type,
         "signal": signal
     }
 

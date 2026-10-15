@@ -88,7 +88,7 @@ class ChartAnalyzer:
                 if not c_data or not c_data.get("candles"):
                     c_data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="1d")
                 candles_5m = c_data.get("candles", []) if c_data else []
-                option_signal = OptionSignalIndicator.evaluate_5m_option_signal(candles_5m, cmp)
+                option_signal = OptionSignalIndicator.evaluate_5m_option_signal(candles_5m, cmp, symbol=analysis.symbol)
                 risk_eval["trade_setup"]["option_indicator_5m"] = option_signal
             except Exception as e:
                 logger.warning(f"Could not compute 5m option indicator for {analysis.symbol}: {e}")

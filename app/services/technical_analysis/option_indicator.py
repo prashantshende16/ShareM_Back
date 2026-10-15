@@ -161,7 +161,67 @@ class OptionSignalIndicator:
         return patterns
 
     @classmethod
-    def evaluate_5m_option_signal(cls, candles: List[Dict[str, Any]], cmp: Optional[float] = None) -> Dict[str, Any]:
+    def get_expiry_dates(cls, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Calculates active weekly and next weekly expiry dates based on Indian market conventions.
+        - NIFTY 50 / BANK NIFTY: Thursday
+        - FINNIFTY: Tuesday
+        - MIDCPNIFTY: Monday
+        - SENSEX: Friday
+        """
+        try:
+            ist = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(ist)
+        except Exception:
+            now_ist = datetime.utcnow()
+
+        sym = (symbol or "NIFTY 50").strip().upper()
+        if "MIDCP" in sym or "MIDCAP" in sym:
+            target_weekday = 0  # Monday
+        elif "FINNIFTY" in sym or "FIN NIFTY" in sym:
+            target_weekday = 1  # Tuesday
+        elif "SENSEX" in sym:
+            target_weekday = 4  # Friday
+        else:
+            target_weekday = 3  # Thursday (Nifty, Bank Nifty)
+
+        days_ahead = (target_weekday - now_ist.weekday()) % 7
+        if days_ahead == 0 and (now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)):
+            days_ahead = 7
+
+        is_today = (days_ahead == 0) and (now_ist.weekday() == target_weekday)
+        current_dt = now_ist + timedelta(days=days_ahead)
+        next_dt = current_dt + timedelta(days=7)
+
+        current_str = current_dt.strftime("%d %b %Y")
+        next_str = next_dt.strftime("%d %b %Y")
+
+        return {
+            "current_expiry": current_str,
+            "next_expiry": next_str,
+            "is_today_expiry": is_today,
+            "available_expiries": [
+                {
+                    "type": "current",
+                    "date": current_str,
+                    "label": f"Current ({'Today / 0DTE' if is_today else 'Weekly'})"
+                },
+                {
+                    "type": "next",
+                    "date": next_str,
+                    "label": "Next Week"
+                }
+            ]
+        }
+
+    @classmethod
+    def evaluate_5m_option_signal(
+        cls,
+        candles: List[Dict[str, Any]],
+        cmp: Optional[float] = None,
+        symbol: Optional[str] = None,
+        expiry_type: str = "current"
+    ) -> Dict[str, Any]:
         """
         Synthesizes Candlestick Patterns + EMA Ribbon + RSI + VWAP into a definitive
         5-minute CALL vs PUT option trade signal.
@@ -281,29 +341,26 @@ class OptionSignalIndicator:
         else:
             base_prem = round(max(180.0, min(450.0, current_price * 0.0055)), 1)
 
-        prem_entry_low = round(base_prem - 3.0, 1)
-        prem_entry_high = round(base_prem + 3.0, 1)
-        # Premium SL in rupees based on Index SL * Delta
-        prem_sl_diff = round(sl_points * delta, 1)
-        prem_sl = max(5.0, round(base_prem - prem_sl_diff, 1))
-        # Premium Targets in rupees based on Index Target * Delta
-        prem_t1 = round(base_prem + (t1_points * delta), 1)
-        prem_t2 = round(base_prem + (t2_points * delta), 1)
-
-        # Calculate upcoming active Thursday weekly expiry
         try:
             ist = pytz.timezone("Asia/Kolkata")
             now_ist = datetime.now(ist)
         except Exception:
             now_ist = datetime.utcnow()
 
-        days_ahead = (3 - now_ist.weekday()) % 7  # 3 = Thursday
-        if days_ahead == 0 and now_ist.hour >= 15:
-            days_ahead = 7
-        elif days_ahead == 0:
-            days_ahead = 0  # Today is expiry Thursday
-        active_expiry_dt = now_ist + timedelta(days=days_ahead)
-        active_expiry_str = active_expiry_dt.strftime("%d %b %Y")
+        # Multi-expiry resolution
+        expiry_info = cls.get_expiry_dates(symbol)
+        is_next = (expiry_type == "next")
+        active_expiry_str = expiry_info["next_expiry"] if is_next else expiry_info["current_expiry"]
+        active_label = "Next Week" if is_next else ("Today / 0DTE" if expiry_info["is_today_expiry"] else "Current Weekly")
+
+        # Time value adjustment for next weekly contract (higher extrinsic value)
+        time_mult = 1.35 if is_next else 1.0
+        prem_entry_low = round((base_prem - 3.0) * time_mult, 1)
+        prem_entry_high = round((base_prem + 3.0) * time_mult, 1)
+        prem_sl_diff = round(sl_points * delta * (1.15 if is_next else 1.0), 1)
+        prem_sl = max(5.0, round(prem_entry_low - prem_sl_diff, 1))
+        prem_t1 = round((base_prem + (t1_points * delta)) * time_mult, 1)
+        prem_t2 = round((base_prem + (t2_points * delta)) * time_mult, 1)
 
         if call_score >= put_score + 20 and call_pct >= 60:
             decision = "BUY CALL (CE)"
@@ -368,6 +425,12 @@ class OptionSignalIndicator:
             "put_score": put_pct,
             "strike_suggestion": strike_suggest,
             "active_expiry": active_expiry_str,
+            "active_expiry_type": "next" if is_next else "current",
+            "active_expiry_label": active_label,
+            "current_expiry": expiry_info["current_expiry"],
+            "next_expiry": expiry_info["next_expiry"],
+            "is_today_expiry": expiry_info["is_today_expiry"],
+            "available_expiries": expiry_info["available_expiries"],
             # Option Premium (₹ Rupees Price traded on broker)
             "option_premium": {
                 "buy_range": f"₹{prem_entry_low} - ₹{prem_entry_high}",
@@ -375,7 +438,26 @@ class OptionSignalIndicator:
                 "target_1": f"₹{prem_t1}",
                 "target_2": f"₹{prem_t2}",
                 "risk_points": f"₹{prem_sl_diff} pts",
-                "reward_points": f"₹{round(prem_t1 - base_prem, 1)} pts"
+                "reward_points": f"₹{round(prem_t1 - (base_prem * time_mult), 1)} pts"
+            },
+            # Pre-calculated dual expiry premiums
+            "expiries_data": {
+                "current": {
+                    "expiry": expiry_info["current_expiry"],
+                    "label": f"Current ({'Today / 0DTE' if expiry_info['is_today_expiry'] else 'Weekly'})",
+                    "buy_range": f"₹{round(base_prem - 3.0, 1)} - ₹{round(base_prem + 3.0, 1)}",
+                    "stop_loss": f"₹{max(5.0, round(base_prem - (sl_points * delta), 1))}",
+                    "target_1": f"₹{round(base_prem + (t1_points * delta), 1)}",
+                    "target_2": f"₹{round(base_prem + (t2_points * delta), 1)}"
+                },
+                "next": {
+                    "expiry": expiry_info["next_expiry"],
+                    "label": "Next Week",
+                    "buy_range": f"₹{round((base_prem - 3.0) * 1.35, 1)} - ₹{round((base_prem + 3.0) * 1.35, 1)}",
+                    "stop_loss": f"₹{max(5.0, round((base_prem - (sl_points * delta)) * 1.25, 1))}",
+                    "target_1": f"₹{round((base_prem + (t1_points * delta)) * 1.35, 1)}",
+                    "target_2": f"₹{round((base_prem + (t2_points * delta)) * 1.35, 1)}"
+                }
             },
             # Underlying Index Spot Levels (Point pivots on chart)
             "index_spot": {
