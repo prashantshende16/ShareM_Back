@@ -65,6 +65,46 @@ class OptionSignalIndicator:
             vwap_list.append(round(cum_pv / cum_vol, 2))
         return vwap_list
 
+    @staticmethod
+    def calculate_atr(candles: List[Dict[str, Any]], period: int = 14) -> List[float]:
+        if len(candles) < 2:
+            return [10.0] * len(candles)
+        tr_list = []
+        for i in range(len(candles)):
+            if i == 0:
+                tr_list.append(candles[i]["high"] - candles[i]["low"])
+            else:
+                h = candles[i]["high"]
+                l = candles[i]["low"]
+                cp = candles[i - 1]["close"]
+                tr = max(h - l, abs(h - cp), abs(l - cp))
+                tr_list.append(tr)
+        atr_list = []
+        for i in range(len(tr_list)):
+            if i < period:
+                atr_list.append(sum(tr_list[:i + 1]) / (i + 1))
+            else:
+                atr_list.append((atr_list[-1] * (period - 1) + tr_list[i]) / period)
+        return [round(x, 2) for x in atr_list]
+
+    @classmethod
+    def calculate_supertrend(cls, candles: List[Dict[str, Any]], period: int = 10, multiplier: float = 3.0) -> Dict[str, Any]:
+        if len(candles) < period + 1:
+            return {"trend": "NEUTRAL", "value": candles[-1]["close"] if candles else 0.0, "atr": 10.0}
+        atr_vals = cls.calculate_atr(candles, period)
+        hl2 = (candles[-1]["high"] + candles[-1]["low"]) / 2.0
+        cur_atr = atr_vals[-1]
+        cur_close = candles[-1]["close"]
+        upper_band = hl2 + (multiplier * cur_atr)
+        lower_band = hl2 - (multiplier * cur_atr)
+        trend = "BULLISH" if cur_close > lower_band else "BEARISH"
+        return {
+            "trend": trend,
+            "upper_band": round(upper_band, 2),
+            "lower_band": round(lower_band, 2),
+            "atr": cur_atr
+        }
+
     @classmethod
     def detect_candlestick_patterns(cls, candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -460,12 +500,43 @@ class OptionSignalIndicator:
         else:
             time_mult = 1.85
 
-        prem_entry_low = round((base_prem - 3.0) * time_mult, 1)
-        prem_entry_high = round((base_prem + 3.0) * time_mult, 1)
-        prem_sl_diff = round(sl_points * delta * (1.15 if active_dte > 0 else 1.0), 1)
-        prem_sl = max(5.0, round(prem_entry_low - prem_sl_diff, 1))
-        prem_t1 = round((base_prem + (t1_points * delta)) * time_mult, 1)
-        prem_t2 = round((base_prem + (t2_points * delta)) * time_mult, 1)
+        # Exchange Lot Sizes
+        LOT_SIZES = {
+            "NIFTY 50": 65,
+            "NIFTY": 65,
+            "BANK NIFTY": 15,
+            "BANKNIFTY": 15,
+            "FINNIFTY": 65,
+            "MIDCPNIFTY": 75,
+            "SENSEX": 10
+        }
+        sym_clean = (symbol or "NIFTY 50").strip().upper()
+        lot_size = 65
+        for k, v in LOT_SIZES.items():
+            if k in sym_clean or sym_clean in k:
+                lot_size = v
+                break
+
+        # Calculate SuperTrend & Volatility
+        supertrend = cls.calculate_supertrend(candles)
+
+        # Realistic Option Contract Pricing & Breakdown (₹)
+        # 0DTE near-ATM contracts trade ~₹25 - ₹65; 1-Day: ~₹35 - ₹95; Weekly: ~₹70 - ₹160
+        if active_dte == 0:
+            prem_ltp = round(max(24.0, min(65.0, base_prem * 0.35)), 1)
+        elif active_dte == 1:
+            prem_ltp = round(max(32.0, min(95.0, base_prem * 0.48)), 1)
+        else:
+            prem_ltp = round(max(55.0, min(220.0, base_prem * 0.85 * time_mult)), 1)
+
+        prem_entry = round(prem_ltp + 4.0, 1) # Breakout trigger level
+        prem_sl_pts = round(max(6.0, min(16.0, prem_entry * 0.22)), 1)
+        prem_sl = round(max(5.0, prem_entry - prem_sl_pts), 1)
+        prem_t1 = round(prem_entry + (prem_sl_pts * 1.35), 1)
+        prem_t2 = round(prem_entry + (prem_sl_pts * 2.8), 1)
+
+        prem_entry_low = round(prem_ltp - 1.0, 1)
+        prem_entry_high = prem_entry
 
         if call_score >= put_score + 20 and call_pct >= 60:
             decision = "BUY CALL (CE)"
@@ -476,9 +547,9 @@ class OptionSignalIndicator:
             target_1 = round(current_price + t1_points, 1)
             target_2 = round(current_price + t2_points, 1)
             summary = (
-                f"High-Probability 5-Minute CALL setup for {strike_suggest} ({active_expiry_str} Expiry). "
-                f"Buy Option Premium around ₹{prem_entry_low} - ₹{prem_entry_high} when Nifty spot holds above {round(current_price, 1)}. "
-                f"Set Option Premium SL at ₹{prem_sl} (Spot SL: {stop_loss})."
+                f"High-Probability 5-Minute CALL setup for {sym_clean} {active_expiry_str} {strike_suggest}. "
+                f"LTP: ₹{prem_ltp}. Recommended Buy Entry above ₹{prem_entry} (SL: ₹{prem_sl}, T1: ₹{prem_t1}, T2: ₹{prem_t2}). "
+                f"Requires ₹{round(lot_size * prem_entry, 2)} capital per lot ({lot_size} qty)."
             )
         elif put_score >= call_score + 20 and put_pct >= 60:
             decision = "BUY PUT (PE)"
@@ -489,9 +560,9 @@ class OptionSignalIndicator:
             target_1 = round(current_price - t1_points, 1)
             target_2 = round(current_price - t2_points, 1)
             summary = (
-                f"High-Probability 5-Minute PUT setup for {strike_suggest} ({active_expiry_str} Expiry). "
-                f"Buy Option Premium around ₹{prem_entry_low} - ₹{prem_entry_high} when Nifty spot breaks under {round(current_price, 1)}. "
-                f"Set Option Premium SL at ₹{prem_sl} (Spot SL: {stop_loss})."
+                f"High-Probability 5-Minute PUT setup for {sym_clean} {active_expiry_str} {strike_suggest}. "
+                f"LTP: ₹{prem_ltp}. Recommended Buy Entry above ₹{prem_entry} (SL: ₹{prem_sl}, T1: ₹{prem_t1}, T2: ₹{prem_t2}). "
+                f"Requires ₹{round(lot_size * prem_entry, 2)} capital per lot ({lot_size} qty)."
             )
         else:
             decision = "WAIT / NO TRADE (Range-Bound)"
@@ -503,9 +574,139 @@ class OptionSignalIndicator:
             target_2 = round(current_price + t2_points, 1)
             summary = (
                 f"5-Minute market is currently consolidating without strong directional confluence. "
-                f"Indicators are conflicting (Call score: {call_score}, Put score: {put_score}). "
+                f"Indicators are conflicting (Call: {call_score}, Put: {put_score}). "
                 f"Wait for clear breakout above {round(current_price + sl_points, 1)} or breakdown below {round(current_price - sl_points, 1)}."
             )
+
+        # -------------------------------------------------------------
+        # 6-INDICATOR CONFLUENCE CHECKLIST (High-Accuracy Observation Matrix)
+        # -------------------------------------------------------------
+        # 1. EMA 9 / 21 Trend Ribbon
+        ema_bias = "CALL" if cur_ema9 > cur_ema21 else "PUT"
+        ema_confirmed = (ema_bias == direction)
+        ind_1 = {
+            "id": 1,
+            "name": "EMA 9 / 21 Trend Ribbon",
+            "bias": ema_bias,
+            "status": "CONFIRMED" if ema_confirmed else "CONFLICT",
+            "value": f"EMA9: {round(cur_ema9, 2)} | EMA21: {round(cur_ema21, 2)}",
+            "description": f"EMA 9 is trading {'above' if ema_bias == 'CALL' else 'below'} EMA 21 ({'Bullish Expansion' if ema_bias == 'CALL' else 'Bearish Expansion'})"
+        }
+
+        # 2. Intraday VWAP Position
+        vwap_bias = "CALL" if current_price > cur_vwap else "PUT"
+        vwap_confirmed = (vwap_bias == direction)
+        ind_2 = {
+            "id": 2,
+            "name": "Intraday VWAP Alignment",
+            "bias": vwap_bias,
+            "status": "CONFIRMED" if vwap_confirmed else "CONFLICT",
+            "value": f"Spot: {round(current_price, 1)} | VWAP: {cur_vwap}",
+            "description": f"Price is trading {'above VWAP (Buyers in command)' if vwap_bias == 'CALL' else 'below VWAP (Sellers in command)'}"
+        }
+
+        # 3. RSI 14 Momentum
+        if cur_rsi >= 54:
+            rsi_bias = "CALL"
+        elif cur_rsi <= 46:
+            rsi_bias = "PUT"
+        else:
+            rsi_bias = "NEUTRAL"
+        rsi_confirmed = (rsi_bias == direction)
+        ind_3 = {
+            "id": 3,
+            "name": "RSI 14 Momentum",
+            "bias": rsi_bias,
+            "status": "CONFIRMED" if rsi_confirmed else ("NEUTRAL" if rsi_bias == "NEUTRAL" else "CONFLICT"),
+            "value": f"RSI: {cur_rsi}",
+            "description": f"RSI at {cur_rsi} showing {'Bullish momentum expansion (>54)' if rsi_bias == 'CALL' else 'Bearish momentum breakdown (<46)' if rsi_bias == 'PUT' else 'Mid-range consolidation'}"
+        }
+
+        # 4. Candlestick Price Action (5-Min)
+        pat_bias = detected_patterns[0]["bias"] if detected_patterns else "NEUTRAL"
+        pat_confirmed = (pat_bias == direction)
+        ind_4 = {
+            "id": 4,
+            "name": "5-Min Candlestick Pattern",
+            "bias": pat_bias,
+            "status": "CONFIRMED" if pat_confirmed else "NEUTRAL",
+            "value": detected_patterns[0]["name"] if detected_patterns else "Consolidation Bar",
+            "description": detected_patterns[0]["description"] if detected_patterns else "Price holding normal range"
+        }
+
+        # 5. SuperTrend (10, 3) / ATR Trailing Band
+        st_trend = supertrend.get("trend", "NEUTRAL")
+        st_bias = "CALL" if st_trend == "BULLISH" else "PUT"
+        st_confirmed = (st_bias == direction)
+        ind_5 = {
+            "id": 5,
+            "name": "SuperTrend (10, 3) / ATR Trail",
+            "bias": st_bias,
+            "status": "CONFIRMED" if st_confirmed else "CONFLICT",
+            "value": f"ATR: {supertrend.get('atr', 0)} pts | Level: {supertrend.get('lower_band' if st_bias == 'CALL' else 'upper_band', 0)}",
+            "description": f"SuperTrend is {st_bias} ({'Price above trailing support' if st_bias == 'CALL' else 'Price below trailing resistance'})"
+        }
+
+        # 6. Volume Expansion & Surge Filter
+        is_vol_surge = (last_vol > prev_vol * 1.25 and last_vol > 0)
+        vol_candle_bull = (last_candle["close"] > last_candle["open"])
+        vol_bias = ("CALL" if vol_candle_bull else "PUT") if is_vol_surge else "NEUTRAL"
+        vol_confirmed = (vol_bias == direction)
+        ind_6 = {
+            "id": 6,
+            "name": "Volume Surge Filter",
+            "bias": vol_bias,
+            "status": "CONFIRMED" if vol_confirmed else "NEUTRAL",
+            "value": f"Vol: {last_vol:,}" if last_vol > 0 else "Normal Volume",
+            "description": "Volume surged +25% on 5m trigger candle" if is_vol_surge else "Standard volume flow"
+        }
+
+        indicator_checklist = [ind_1, ind_2, ind_3, ind_4, ind_5, ind_6]
+        confirmed_count = sum(1 for ind in indicator_checklist if ind["status"] == "CONFIRMED")
+        confluence_pct = int(round((confirmed_count / 6.0) * 100))
+        verdict = (
+            "STRONG CONFLUENCE (High Probability Setup)" if confirmed_count >= 5
+            else "GOOD CONFLUENCE (Tradeable Setup)" if confirmed_count >= 4
+            else "MODERATE CONFLUENCE (Caution / Wait)" if confirmed_count == 3
+            else "WEAK CONFLUENCE (Consolidation)"
+        )
+        confluence_score = {
+            "confirmed": confirmed_count,
+            "total": 6,
+            "percentage": confluence_pct,
+            "verdict": verdict
+        }
+
+        # Trade Execution Details & Lot/Capital Math
+        capital_required = round(lot_size * prem_entry, 2)
+        risk_per_share = round(prem_entry - prem_sl, 2)
+        max_risk_amount = round(lot_size * risk_per_share, 2)
+        target_1_profit = round(lot_size * (prem_t1 - prem_entry), 2)
+        target_2_profit = round(lot_size * (prem_t2 - prem_entry), 2)
+        contract_name = f"{sym_clean} {active_expiry_str.upper()} {strike_suggest}"
+
+        trade_execution = {
+            "contract_name": contract_name,
+            "symbol": sym_clean,
+            "expiry": active_expiry_str,
+            "strike": strike_suggest,
+            "lot_size": lot_size,
+            "lots": 1,
+            "total_quantity": lot_size,
+            "current_ltp": prem_ltp,
+            "recommended_entry": prem_entry,
+            "stop_loss": prem_sl,
+            "target_1": prem_t1,
+            "target_2": prem_t2,
+            "risk_per_share": risk_per_share,
+            "reward_target_1": round(prem_t1 - prem_entry, 1),
+            "reward_target_2": round(prem_t2 - prem_entry, 1),
+            "capital_required": capital_required,
+            "max_risk_amount": max_risk_amount,
+            "target_1_profit": target_1_profit,
+            "target_2_profit": target_2_profit,
+            "risk_reward_ratio": f"1 : {round((prem_t1 - prem_entry) / max(0.1, risk_per_share), 1)}"
+        }
 
         generated_at_str = now_ist.strftime("%I:%M:%S %p")
         generated_at_iso = now_ist.isoformat()
@@ -583,14 +784,19 @@ class OptionSignalIndicator:
             "next_expiry": expiry_info["next_expiry"],
             "is_today_expiry": expiry_info["is_today_expiry"],
             "available_expiries": expiry_info["available_expiries"],
+            # Detailed Trade Execution (Lot Size, Capital, Max Risk)
+            "trade_execution": trade_execution,
+            # 6-Indicator Observation Checklist
+            "indicator_checklist": indicator_checklist,
+            "confluence_score": confluence_score,
             # Option Premium (₹ Rupees Price traded on broker)
             "option_premium": {
                 "buy_range": f"₹{prem_entry_low} - ₹{prem_entry_high}",
                 "stop_loss": f"₹{prem_sl}",
                 "target_1": f"₹{prem_t1}",
                 "target_2": f"₹{prem_t2}",
-                "risk_points": f"₹{prem_sl_diff} pts",
-                "reward_points": f"₹{round(prem_t1 - (base_prem * time_mult), 1)} pts"
+                "risk_points": f"₹{risk_per_share} pts",
+                "reward_points": f"₹{round(prem_t1 - prem_entry, 1)} pts"
             },
             "expiries_data": expiries_data,
             # Underlying Index Spot Levels (Point pivots on chart)
@@ -620,6 +826,7 @@ class OptionSignalIndicator:
                 "ema_21": round(cur_ema21, 2),
                 "rsi_14": cur_rsi,
                 "vwap": cur_vwap,
+                "supertrend": supertrend.get("trend"),
                 "trend_ribbon": "BULLISH" if cur_ema9 > cur_ema21 else "BEARISH",
                 "vwap_position": "ABOVE_VWAP" if current_price > cur_vwap else "BELOW_VWAP"
             },
