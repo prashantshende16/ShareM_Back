@@ -240,6 +240,17 @@ async def run_analysis(id: int, background_tasks: BackgroundTasks, db: Session =
 
     return format_analysis_response(analysis)
 
+@router.delete("")
+def delete_all_analyses(db: Session = Depends(get_db)):
+    analyses = db.query(Analysis).all()
+    count = len(analyses)
+    for a in analyses:
+        for s in a.screenshots:
+            remove_screenshot_file(s.file_path)
+        db.delete(a)
+    db.commit()
+    return {"message": f"Successfully deleted {count} analyses", "deleted_count": count}
+
 @router.delete("/{id}")
 def delete_analysis(id: int, db: Session = Depends(get_db)):
     analysis = db.query(Analysis).filter(Analysis.id == id).first()
