@@ -104,7 +104,7 @@ class AngelOneService:
             "X-UserType": "USER",
             "X-SourceID": "WEB",
             "X-ClientLocalIP": "127.0.0.1",
-            "X-ClientPublicIP": "106.193.147.98",
+            "X-ClientPublicIP": "49.248.4.74",
             "X-MACAddress": "fe80::",
             "X-PrivateKey": api_key,
         }
@@ -359,3 +359,4 @@ class AngelOneService:
                 "Configured (will authenticate on first request)" if configured else "Not configured. Enter API Key & TOTP in Settings."
             )
         }
+
