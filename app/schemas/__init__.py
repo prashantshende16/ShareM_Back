@@ -217,6 +217,13 @@ class SettingsUpdate(BaseModel):
     openai_model: Optional[str] = None
     gemini_model: Optional[str] = None
     anthropic_model: Optional[str] = None
+    
+    # Angel One SmartAPI Settings
+    angel_one_api_key: Optional[str] = None
+    angel_one_client_code: Optional[str] = None
+    angel_one_pin: Optional[str] = None
+    angel_one_totp_key: Optional[str] = None
+    data_source_preference: Optional[str] = None
 
 class SettingsStatusResponse(BaseModel):
     current_provider: str
@@ -226,3 +233,6 @@ class SettingsStatusResponse(BaseModel):
     is_anthropic_configured: bool
     market_data_connected: bool
     market_data_status: str
+    angel_one_configured: bool = False
+    angel_one_client_code: Optional[str] = ""
+    data_source_preference: str = "auto"

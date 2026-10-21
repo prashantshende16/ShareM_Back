@@ -3,6 +3,7 @@ from app.config import settings
 from app.schemas import SettingsUpdate, SettingsStatusResponse
 from app.services.ai.factory import get_ai_provider
 from app.services.market_data.provider import market_data_provider
+from app.services.market_data.angel_one_service import AngelOneService
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -15,7 +16,10 @@ def get_settings():
         is_gemini_configured=bool(settings.GEMINI_API_KEY),
         is_anthropic_configured=bool(settings.ANTHROPIC_API_KEY),
         market_data_connected=market_data_provider.is_connected(),
-        market_data_status=market_data_provider.get_status().get("message", "Market data not connected")
+        market_data_status=market_data_provider.get_status().get("message", "Market data not connected"),
+        angel_one_configured=AngelOneService.is_configured(),
+        angel_one_client_code=getattr(settings, "ANGEL_ONE_CLIENT_CODE", ""),
+        data_source_preference=getattr(settings, "DATA_SOURCE_PREFERENCE", "auto")
     )
 
 @router.post("", response_model=SettingsStatusResponse)
@@ -41,6 +45,18 @@ def update_settings(data: SettingsUpdate):
     if data.anthropic_model is not None:
         settings.ANTHROPIC_MODEL = data.anthropic_model
 
+    # Angel One Settings
+    if data.angel_one_api_key is not None:
+        settings.ANGEL_ONE_API_KEY = data.angel_one_api_key
+    if data.angel_one_client_code is not None:
+        settings.ANGEL_ONE_CLIENT_CODE = data.angel_one_client_code
+    if data.angel_one_pin is not None:
+        settings.ANGEL_ONE_PIN = data.angel_one_pin
+    if data.angel_one_totp_key is not None:
+        settings.ANGEL_ONE_TOTP_KEY = data.angel_one_totp_key
+    if data.data_source_preference is not None:
+        settings.DATA_SOURCE_PREFERENCE = data.data_source_preference
+
     # Persist to .env
     try:
         env_lines = [
@@ -54,6 +70,11 @@ def update_settings(data: SettingsUpdate):
             f"DATABASE_URL={settings.DATABASE_URL}\n",
             f"UPLOAD_DIR={settings.UPLOAD_DIR}\n",
             f"MARKET_DATA_PROVIDER={settings.MARKET_DATA_PROVIDER}\n",
+            f"DATA_SOURCE_PREFERENCE={getattr(settings, 'DATA_SOURCE_PREFERENCE', 'auto')}\n",
+            f"ANGEL_ONE_API_KEY={getattr(settings, 'ANGEL_ONE_API_KEY', '')}\n",
+            f"ANGEL_ONE_CLIENT_CODE={getattr(settings, 'ANGEL_ONE_CLIENT_CODE', '')}\n",
+            f"ANGEL_ONE_PIN={getattr(settings, 'ANGEL_ONE_PIN', '')}\n",
+            f"ANGEL_ONE_TOTP_KEY={getattr(settings, 'ANGEL_ONE_TOTP_KEY', '')}\n",
         ]
         with open(".env", "w") as f:
             f.writelines(env_lines)
@@ -86,3 +107,13 @@ async def test_ai_connection():
             "provider": settings.AI_PROVIDER,
             "message": f"Connection test failed: {str(e)}"
         }
+
+@router.post("/test-angel-one")
+async def test_angel_one_connection():
+    """Tests Angel One SmartAPI live credentials and quotes."""
+    return await AngelOneService.test_connection()
+
+@router.get("/angel-one/status")
+def get_angel_one_status():
+    """Returns Angel One configuration and session status."""
+    return AngelOneService.get_status()

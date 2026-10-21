@@ -24,11 +24,14 @@ class LiveFeedMarketDataProvider(MarketDataProvider):
         return True
 
     def get_status(self) -> Dict[str, Any]:
+        from app.services.market_data.angel_one_service import AngelOneService
+        angel_cfg = AngelOneService.is_configured()
         return {
             "connected": True,
-            "provider": "Live Market Feed",
-            "message": "Connected to Real-Time Market Data Feed (NSE/BSE & Global Macro)",
-            "supported_future_brokers": ["Zerodha Kite", "Upstox", "Angel One", "Dhan", "5paisa"]
+            "provider": "Angel One SmartAPI" if angel_cfg else "Live Market Feed (NSE/Global)",
+            "angel_one_active": angel_cfg,
+            "message": "Connected to Angel One SmartAPI (Live Tick & Option Feed)" if angel_cfg else "Connected to Real-Time Market Data Feed (NSE/BSE & Global Macro with Angel One option ready)",
+            "supported_brokers": ["Angel One SmartAPI (Free)", "DhanHQ", "Zerodha Kite"]
         }
 
     async def get_live_quote(self, symbol: str) -> Optional[Dict[str, Any]]:

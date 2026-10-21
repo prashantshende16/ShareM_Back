@@ -26,8 +26,15 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
     
-    # Market Data Provider
+    # Market Data Provider & Broker Integrations
     MARKET_DATA_PROVIDER: str = os.getenv("MARKET_DATA_PROVIDER", "none")
+    DATA_SOURCE_PREFERENCE: str = os.getenv("DATA_SOURCE_PREFERENCE", "auto")  # auto, angel_one, yfinance
+    
+    # Angel One SmartAPI (100% Free Live Data & Option Chain)
+    ANGEL_ONE_API_KEY: str = os.getenv("ANGEL_ONE_API_KEY", "")
+    ANGEL_ONE_CLIENT_CODE: str = os.getenv("ANGEL_ONE_CLIENT_CODE", "")
+    ANGEL_ONE_PIN: str = os.getenv("ANGEL_ONE_PIN", "")
+    ANGEL_ONE_TOTP_KEY: str = os.getenv("ANGEL_ONE_TOTP_KEY", "")
     
     # CORS
     CORS_ORIGINS: List[str] = ["*"]

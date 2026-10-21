@@ -78,6 +78,22 @@ class LiveMarketService:
 
     @classmethod
     def get_candle_data(cls, yf_symbol: str, interval: str = "5m", range_: str = "1d") -> Optional[Dict[str, Any]]:
+        # 1. Check Angel One SmartAPI first if configured and preferred
+        try:
+            from app.config import settings
+            from app.services.market_data.angel_one_service import AngelOneService
+            if AngelOneService.is_configured() and getattr(settings, "DATA_SOURCE_PREFERENCE", "auto") != "yfinance":
+                angel_data = AngelOneService.get_candle_data_sync(yf_symbol, interval=interval)
+                if angel_data and angel_data.get("candles"):
+                    valid_candles = angel_data["candles"]
+                    closes_list = [c["close"] for c in valid_candles]
+                    angel_data["rsi_14"] = cls.calculate_rsi(closes_list, 14) if len(closes_list) >= 15 else None
+                    angel_data["ema_20"] = cls.calculate_ema(closes_list, 20) if len(closes_list) >= 20 else None
+                    return angel_data
+        except Exception as e:
+            logger.warning(f"Angel One data retrieval fallback to Yahoo Finance: {e}")
+
+        # 2. Fallback to Yahoo Finance query
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}?interval={interval}&range={range_}"
         data = fetch_json(url)
         if not data or "chart" not in data or not data["chart"].get("result"):
