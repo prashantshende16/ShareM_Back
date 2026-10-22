@@ -317,3 +317,4 @@ Return STRICTLY valid JSON ONLY adhering to this exact schema (no markdown, no b
                 "Ensure strict discipline on Stop Loss; exit if momentum breaks trend ribbon"
             ]
         }
+
