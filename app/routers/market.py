@@ -1,7 +1,10 @@
 import os
 import uuid
 import logging
-from typing import Optional
+from datetime import datetime, timedelta
+import pytz
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -95,6 +98,57 @@ def get_option_indicator_signal(
         "yf_symbol": yf_sym,
         "expiry_type": expiry_type,
         "signal": signal
+    }
+
+@router.get("/all-option-signals")
+def get_all_option_indicator_signals(
+    expiry_type: str = Query(default="current", description="Expiry preference: 'current' or 'next'")
+):
+    """
+    Evaluates 5-Minute Option Indicator Decisions for ALL Major Indian Indices in parallel:
+    - NIFTY 50
+    - BANK NIFTY
+    - SENSEX
+    - FINNIFTY
+    - MIDCPNIFTY
+    Recalculates all signals starting from the exact refresh time onward.
+    """
+    from app.services.technical_analysis.option_indicator import OptionSignalIndicator
+    
+    symbols = ["NIFTY 50", "BANK NIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"]
+    results = {}
+    
+    def process_sym(sym):
+        try:
+            yf_sym = LiveMarketService.resolve_symbol(sym)
+            data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="5d")
+            if not data or not data.get("candles"):
+                data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="1d")
+            candles = data.get("candles", []) if data else []
+            cmp = data.get("current_price") if data else None
+            sig = OptionSignalIndicator.evaluate_5m_option_signal(candles, cmp, symbol=sym, expiry_type=expiry_type)
+            return sym, sig
+        except Exception as e:
+            logger.warning(f"Error evaluating all-market signal for {sym}: {e}")
+            return sym, None
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(process_sym, s) for s in symbols]
+        for f in futures:
+            s_name, s_res = f.result()
+            if s_res:
+                results[s_name] = s_res
+
+    ist = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.now(ist)
+
+    return {
+        "status": "success",
+        "timestamp": now_ist.strftime("%I:%M:%S %p"),
+        "timestamp_iso": now_ist.isoformat(),
+        "valid_until": (now_ist + timedelta(minutes=30)).strftime("%I:%M:%S %p"),
+        "total_markets": len(results),
+        "signals": results
     }
 
 @router.post("/analyze-live")
@@ -211,5 +265,39 @@ async def analyze_live_market(
         "message": f"Live analysis initiated for {symbol} across multiple timeframes with global market cues.",
         "base_info": base_info,
         "global_sentiment": global_ov.get("global_sentiment")
+    }
+
+@router.post("/analyze-all-live")
+async def analyze_all_live_markets(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Triggers 1-Click Live AI Chart Analyses for ALL major Indian markets:
+    - NIFTY 50
+    - BANK NIFTY
+    - SENSEX
+    - FINNIFTY
+    Generates new multi-timeframe analyses from the current moment for all markets.
+    """
+    symbols = [
+        {"symbol": "NIFTY 50", "market": "NIFTY"},
+        {"symbol": "BANK NIFTY", "market": "BANKNIFTY"},
+        {"symbol": "SENSEX", "market": "SENSEX"},
+        {"symbol": "FINNIFTY", "market": "FINNIFTY"},
+    ]
+    created = []
+    for item in symbols:
+        try:
+            req = LiveAnalysisRequest(symbol=item["symbol"], market=item["market"])
+            res = await analyze_live_market(req, background_tasks, db)
+            created.append({"symbol": item["symbol"], "analysis_id": res["analysis_id"]})
+        except Exception as e:
+            logger.warning(f"Could not auto-analyze {item['symbol']}: {e}")
+
+    return {
+        "status": "success",
+        "message": f"Successfully initiated live multi-timeframe analyses for {len(created)} markets",
+        "analyses": created
     }
 

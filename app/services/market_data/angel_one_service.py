@@ -5,6 +5,7 @@ import hashlib
 import base64
 import logging
 import datetime
+import threading
 from typing import Dict, Any, List, Optional
 import httpx
 
@@ -87,6 +88,7 @@ class AngelOneService:
     _client_code: Optional[str] = None
     _scrip_cache: Dict[str, Any] = {}
     _scrip_cache_time: Dict[str, float] = {}
+    _login_lock = threading.Lock()
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -121,53 +123,59 @@ class AngelOneService:
         if not force and cls._session_token and now < cls._token_expiry:
             return {"status": True, "token": cls._session_token, "cached": True}
 
-        api_key = getattr(settings, "ANGEL_ONE_API_KEY", "").strip()
-        client_code = getattr(settings, "ANGEL_ONE_CLIENT_CODE", "").strip()
-        pin = getattr(settings, "ANGEL_ONE_PIN", "").strip()
-        totp_key = getattr(settings, "ANGEL_ONE_TOTP_KEY", "").strip()
+        with cls._login_lock:
+            # Double-check inside lock
+            now = time.time()
+            if not force and cls._session_token and now < cls._token_expiry:
+                return {"status": True, "token": cls._session_token, "cached": True}
 
-        if not (api_key and client_code and pin and totp_key):
-            return {
-                "status": False,
-                "message": "Angel One credentials incomplete. Please configure API Key, Client Code, PIN, and TOTP Key in Settings."
+            api_key = getattr(settings, "ANGEL_ONE_API_KEY", "").strip()
+            client_code = getattr(settings, "ANGEL_ONE_CLIENT_CODE", "").strip()
+            pin = getattr(settings, "ANGEL_ONE_PIN", "").strip()
+            totp_key = getattr(settings, "ANGEL_ONE_TOTP_KEY", "").strip()
+
+            if not (api_key and client_code and pin and totp_key):
+                return {
+                    "status": False,
+                    "message": "Angel One credentials incomplete. Please configure API Key, Client Code, PIN, and TOTP Key in Settings."
+                }
+
+            try:
+                totp_code = generate_totp(totp_key)
+            except Exception as e:
+                return {"status": False, "message": f"Invalid TOTP Key format: {e}"}
+
+            login_url = f"{cls.BASE_URL}/rest/auth/angelbroking/user/v1/loginByPassword"
+            payload = {
+                "clientcode": client_code,
+                "password": pin,
+                "totp": totp_code
             }
 
-        try:
-            totp_code = generate_totp(totp_key)
-        except Exception as e:
-            return {"status": False, "message": f"Invalid TOTP Key format: {e}"}
+            try:
+                with httpx.Client(timeout=10.0) as client:
+                    res = client.post(login_url, json=payload, headers=cls.get_headers())
+                    data = res.json()
 
-        login_url = f"{cls.BASE_URL}/rest/auth/angelbroking/user/v1/loginByPassword"
-        payload = {
-            "clientcode": client_code,
-            "password": pin,
-            "totp": totp_code
-        }
-
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                res = client.post(login_url, json=payload, headers=cls.get_headers())
-                data = res.json()
-
-                if data.get("status") is True and data.get("data"):
-                    jwt_token = data["data"].get("jwtToken")
-                    cls._session_token = jwt_token
-                    cls._token_expiry = now + (5 * 3600)
-                    cls._client_code = client_code
-                    logger.info("Angel One SmartAPI login successful.")
-                    return {
-                        "status": True,
-                        "token": jwt_token,
-                        "feed_token": data["data"].get("feedToken"),
-                        "message": "Login successful"
-                    }
-                else:
-                    err_msg = data.get("message") or data.get("errorcode") or "Unknown error"
-                    logger.warning(f"Angel One login failed: {err_msg}")
-                    return {"status": False, "message": err_msg}
-        except Exception as e:
-            logger.error(f"Angel One login request error: {e}")
-            return {"status": False, "message": f"Network error during Angel One login: {str(e)}"}
+                    if data.get("status") is True and data.get("data"):
+                        jwt_token = data["data"].get("jwtToken")
+                        cls._session_token = jwt_token
+                        cls._token_expiry = now + (5 * 3600)
+                        cls._client_code = client_code
+                        logger.info("Angel One SmartAPI login successful.")
+                        return {
+                            "status": True,
+                            "token": jwt_token,
+                            "feed_token": data["data"].get("feedToken"),
+                            "message": "Login successful"
+                        }
+                    else:
+                        err_msg = data.get("message") or data.get("errorcode") or "Unknown error"
+                        logger.warning(f"Angel One login failed: {err_msg}")
+                        return {"status": False, "message": err_msg}
+            except Exception as e:
+                logger.error(f"Angel One login request error: {e}")
+                return {"status": False, "message": f"Network error during Angel One login: {str(e)}"}
 
     @classmethod
     async def login(cls, force: bool = False) -> Dict[str, Any]:
