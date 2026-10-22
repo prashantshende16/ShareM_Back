@@ -85,6 +85,8 @@ class AngelOneService:
     _session_token: Optional[str] = None
     _token_expiry: float = 0.0
     _client_code: Optional[str] = None
+    _scrip_cache: Dict[str, Any] = {}
+    _scrip_cache_time: Dict[str, float] = {}
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -359,4 +361,142 @@ class AngelOneService:
                 "Configured (will authenticate on first request)" if configured else "Not configured. Enter API Key & TOTP in Settings."
             )
         }
+
+    @classmethod
+    def get_option_quote_sync(
+        cls,
+        underlying: str,
+        expiry_str: str,
+        strike: int,
+        option_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves real-time live Option LTP and market quote from Angel One SmartAPI
+        for any strike, expiry, and option type (CE/PE) on BFO (SENSEX) or NFO (NIFTY/BANKNIFTY).
+        """
+        if not cls.is_configured():
+            return None
+
+        login_res = cls.login_sync()
+        if not login_res.get("status"):
+            return None
+
+        underlying_clean = underlying.upper().strip()
+        is_sensex = "SENSEX" in underlying_clean
+        is_banknifty = "BANK" in underlying_clean
+        exchange = "BFO" if is_sensex else "NFO"
+        base_keyword = "SENSEX" if is_sensex else ("BANKNIFTY" if is_banknifty else "NIFTY")
+
+        cache_key = f"{exchange}_{base_keyword}"
+        now = time.time()
+
+        # Check scrip cache (refresh every 15 minutes)
+        if cache_key not in cls._scrip_cache or (now - cls._scrip_cache_time.get(cache_key, 0) > 900):
+            try:
+                url = f"{cls.BASE_URL}/rest/secure/angelbroking/order/v1/searchScrip"
+                headers = cls.get_headers(cls._session_token)
+                with httpx.Client(timeout=8.0) as client:
+                    res = client.post(url, json={"exchange": exchange, "searchscrip": base_keyword}, headers=headers)
+                    if res.status_code == 200:
+                        data = res.json().get("data", [])
+                        if data:
+                            cls._scrip_cache[cache_key] = data
+                            cls._scrip_cache_time[cache_key] = now
+            except Exception as e:
+                logger.warning(f"Error fetching Angel One scrip master for {cache_key}: {e}")
+
+        scrips = cls._scrip_cache.get(cache_key, [])
+        if not scrips:
+            return None
+
+        # Parse expiry date
+        dt = None
+        for fmt in ("%d %b %Y", "%Y-%m-%d", "%d-%b-%Y", "%d %B %Y"):
+            try:
+                dt = datetime.datetime.strptime(expiry_str.strip(), fmt)
+                break
+            except Exception:
+                continue
+
+        if not dt:
+            dt = datetime.datetime.now()
+
+        y2 = dt.strftime("%y")
+        m3 = dt.strftime("%b").upper()
+        m1 = m3[0]
+        d2 = dt.strftime("%d")
+
+        opt = option_type.upper().strip()
+        stk = str(int(strike))
+
+        # Build probable tradingsymbol patterns used by BSE and NSE
+        patterns = [
+            f"{base_keyword}{y2}{m1}{d2}{stk}{opt}",   # BSE weekly (e.g. SENSEX26O2273400CE)
+            f"{base_keyword}{y2}{m3}{stk}{opt}",       # BSE/NSE monthly (e.g. SENSEX26OCT73400CE)
+            f"{base_keyword}{d2}{m3}{y2}{stk}{opt}",   # NSE weekly/monthly (e.g. NIFTY22OCT26...)
+            f"{base_keyword}{y2}{m3}{d2}{stk}{opt}",
+            f"{base_keyword}{y2}{d2}{m3}{stk}{opt}",
+        ]
+
+        matched = None
+        # 1. Exact pattern match
+        for item in scrips:
+            ts = item.get("tradingsymbol", "")
+            if ts in patterns:
+                matched = item
+                break
+
+        # 2. Fuzzy suffix match by strike + opt + date components
+        if not matched:
+            suffix = f"{stk}{opt}"
+            candidates = [x for x in scrips if x.get("tradingsymbol", "").endswith(suffix)]
+            for cand in candidates:
+                ts = cand.get("tradingsymbol", "")
+                if (f"{y2}{m1}{d2}" in ts) or (f"{d2}{m3}{y2}" in ts) or (f"{y2}{m3}" in ts):
+                    matched = cand
+                    break
+
+        if not matched:
+            return None
+
+        # Fetch live quote for the matched contract
+        try:
+            ltp_url = f"{cls.BASE_URL}/rest/secure/angelbroking/order/v1/getLtpData"
+            headers = cls.get_headers(cls._session_token)
+            with httpx.Client(timeout=6.0) as client:
+                res = client.post(
+                    ltp_url,
+                    json={
+                        "exchange": exchange,
+                        "tradingsymbol": matched["tradingsymbol"],
+                        "symboltoken": matched["symboltoken"]
+                    },
+                    headers=headers
+                )
+                if res.status_code == 200:
+                    d = res.json().get("data", {})
+                    ltp_val = float(d.get("ltp", 0.0))
+                    close_val = float(d.get("close", 0.0))
+                    open_val = float(d.get("open", 0.0))
+                    high_val = float(d.get("high", 0.0))
+                    low_val = float(d.get("low", 0.0))
+                    effective_ltp = ltp_val if ltp_val > 0 else (close_val if close_val > 0 else high_val)
+
+                    return {
+                        "tradingsymbol": matched["tradingsymbol"],
+                        "symboltoken": matched["symboltoken"],
+                        "exchange": exchange,
+                        "ltp": round(effective_ltp, 2),
+                        "close": round(close_val, 2),
+                        "open": round(open_val, 2),
+                        "high": round(high_val, 2),
+                        "low": round(low_val, 2),
+                        "strike": strike,
+                        "option_type": opt,
+                        "is_live_angel_one": True
+                    }
+        except Exception as e:
+            logger.warning(f"Error fetching Angel One LTP for {matched.get('tradingsymbol')}: {e}")
+
+        return None
 

@@ -318,7 +318,9 @@ class OptionSignalIndicator:
         candles: List[Dict[str, Any]],
         cmp: Optional[float] = None,
         symbol: Optional[str] = None,
-        expiry_type: str = "current"
+        expiry_type: str = "current",
+        selected_strike: Optional[int] = None,
+        selected_option_type: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Synthesizes Candlestick Patterns + EMA Ribbon + RSI + VWAP into a definitive
@@ -518,12 +520,13 @@ class OptionSignalIndicator:
         # Calculate SuperTrend & Volatility
         supertrend = cls.calculate_supertrend(candles)
 
-        # 1. First, determine Decision, Direction & Recommended Strike
+        # 1. Determine Decision & Direction
         if call_score >= put_score + 20 and call_pct >= 60:
             decision = "BUY CALL (CE)"
             direction = "CALL"
             confidence = min(92, max(64, call_pct))
-            strike_suggest = f"{atm_strike} CE"
+            default_opt_type = "CE"
+            default_strike = atm_strike
             stop_loss = round(current_price - sl_points, 1)
             target_1 = round(current_price + t1_points, 1)
             target_2 = round(current_price + t2_points, 1)
@@ -531,7 +534,8 @@ class OptionSignalIndicator:
             decision = "BUY PUT (PE)"
             direction = "PUT"
             confidence = min(92, max(64, put_pct))
-            strike_suggest = f"{atm_strike} PE"
+            default_opt_type = "PE"
+            default_strike = atm_strike
             stop_loss = round(current_price + sl_points, 1)
             target_1 = round(current_price - t1_points, 1)
             target_2 = round(current_price - t2_points, 1)
@@ -539,62 +543,113 @@ class OptionSignalIndicator:
             decision = "WAIT / NO TRADE (Range-Bound)"
             direction = "SIDEWAYS"
             confidence = 52
-            strike_suggest = f"{atm_strike} Straddle / Wait"
+            default_opt_type = "CE"
+            default_strike = atm_strike
             stop_loss = round(current_price - sl_points, 1)
             target_1 = round(current_price + t1_points, 1)
             target_2 = round(current_price + t2_points, 1)
 
-        # 2. Dynamic Option Premium Pricing (Intrinsic + Extrinsic Time Value)
-        # Accurately matches exchange traded market prices for NIFTY, BANKNIFTY, SENSEX
-        # A. Intrinsic Value (How much In-The-Money the option is)
-        if direction == "CALL":
-            intrinsic = max(0.0, current_price - atm_strike)
-        elif direction == "PUT":
-            intrinsic = max(0.0, atm_strike - current_price)
+        # Resolve selected strike or default
+        target_strike = int(selected_strike) if selected_strike else default_strike
+        target_opt_type = (selected_option_type or default_opt_type).upper().strip()
+        strike_suggest = f"{target_strike} {target_opt_type}"
+
+        # Build Interactive Strike List around ATM for UI selection (-5 to +5 steps)
+        available_strikes = []
+        for i in range(-5, 6):
+            s_val = atm_strike + (i * strike_step)
+            diff = s_val - atm_strike
+            if diff == 0:
+                s_tag = "ATM"
+            elif (target_opt_type == "CE" and diff < 0) or (target_opt_type == "PE" and diff > 0):
+                s_tag = f"ITM {abs(diff)}"
+            else:
+                s_tag = f"OTM {abs(diff)}"
+            available_strikes.append({
+                "strike": s_val,
+                "label": f"{s_val} ({s_tag})",
+                "tag": s_tag,
+                "is_atm": diff == 0,
+                "is_selected": s_val == target_strike
+            })
+
+        # Calculate Intrinsic Value for the target strike
+        if target_opt_type == "CE":
+            intrinsic = max(0.0, current_price - target_strike)
         else:
-            intrinsic = 0.0
+            intrinsic = max(0.0, target_strike - current_price)
 
-        # B. Extrinsic Time Value based on Days to Expiry (DTE) and Index Spot level
-        if active_dte == 0:
-            # 0DTE (Same-day expiry): Intraday theta decay
-            hour_ist = now_ist.hour if hasattr(now_ist, 'hour') else 12
-            decay = 0.60 if hour_ist >= 14 else (0.75 if hour_ist >= 12 else 1.0)
-            time_val = base_prem * 0.55 * decay
-        elif active_dte == 1:
-            # 1 DTE (Next-day expiry, e.g. Wed before Thu expiry)
-            time_val = base_prem * 0.85
-        elif active_dte <= 4:
-            # 2 to 4 DTE
-            time_val = base_prem * 1.15
-        elif active_dte <= 7:
-            # Weekly contract
-            time_val = base_prem * 1.35
+        # 2. Try fetching REAL LIVE OPTION QUOTE from Angel One SmartAPI
+        live_option_quote = None
+        try:
+            from app.services.market_data.angel_one_service import AngelOneService
+            if AngelOneService.is_configured():
+                live_option_quote = AngelOneService.get_option_quote_sync(
+                    underlying=sym_clean,
+                    expiry_str=active_expiry_str,
+                    strike=target_strike,
+                    option_type=target_opt_type
+                )
+        except Exception as e:
+            logger.warning(f"Could not fetch Angel One option quote for {sym_clean} {target_strike} {target_opt_type}: {e}")
+
+        is_live_angel_one = False
+        real_high = 0.0
+        real_low = 0.0
+        real_close = 0.0
+        real_open = 0.0
+        contract_tradingsymbol = ""
+
+        if live_option_quote and live_option_quote.get("ltp", 0.0) > 0:
+            # REAL LIVE MARKET DATA FROM ANGEL ONE
+            prem_ltp = round(float(live_option_quote["ltp"]), 1)
+            real_close = round(float(live_option_quote.get("close", 0.0)), 1)
+            real_high = round(float(live_option_quote.get("high", 0.0)), 1)
+            real_low = round(float(live_option_quote.get("low", 0.0)), 1)
+            real_open = round(float(live_option_quote.get("open", 0.0)), 1)
+            contract_tradingsymbol = live_option_quote.get("tradingsymbol", "")
+            is_live_angel_one = True
+
+            # Entry buffer ~3-4% above current LTP
+            entry_buffer = round(max(1.5, min(15.0, prem_ltp * 0.035)), 1)
+            prem_entry = round(prem_ltp + entry_buffer, 1)
+
+            # SL: approx 18-20% risk on premium
+            prem_sl_pts = round(max(3.0, min(50.0, prem_entry * 0.18)), 1)
+            prem_sl = round(max(1.0, prem_entry - prem_sl_pts), 1)
+            prem_t1 = round(prem_entry + (prem_sl_pts * 1.5), 1)
+            prem_t2 = round(prem_entry + (prem_sl_pts * 2.8), 1)
         else:
-            # Monthly / extended
-            time_val = base_prem * time_mult
+            # FALLBACK SYNTHETIC BLACK-SCHOLES/INTRINSIC HEURISTIC
 
-        # If option is deep In-The-Money (ITM), extrinsic time value compresses
-        if intrinsic > 0:
-            compression = max(0.20, 1.0 - (intrinsic / max(100.0, current_price * 0.015)))
-            time_val = time_val * compression
-        elif (direction == "CALL" and atm_strike > current_price) or (direction == "PUT" and atm_strike < current_price):
-            # Out-Of-The-Money (OTM) delta decay
-            dist = abs(current_price - atm_strike)
-            otm_factor = math.exp(-0.5 * (dist / max(10.0, time_val * 1.2)) ** 2)
-            time_val = max(5.0, time_val * otm_factor)
+            if active_dte == 0:
+                hour_ist = now_ist.hour if hasattr(now_ist, 'hour') else 12
+                decay = 0.60 if hour_ist >= 14 else (0.75 if hour_ist >= 12 else 1.0)
+                time_val = base_prem * 0.55 * decay
+            elif active_dte == 1:
+                time_val = base_prem * 0.85
+            elif active_dte <= 4:
+                time_val = base_prem * 1.15
+            elif active_dte <= 7:
+                time_val = base_prem * 1.35
+            else:
+                time_val = base_prem * time_mult
 
-        # Real Total Premium = Intrinsic Value + Time Value
-        prem_ltp = round(max(5.0, intrinsic + time_val), 1)
+            if intrinsic > 0:
+                compression = max(0.20, 1.0 - (intrinsic / max(100.0, current_price * 0.015)))
+                time_val = time_val * compression
+            elif (target_opt_type == "CE" and target_strike > current_price) or (target_opt_type == "PE" and target_strike < current_price):
+                dist = abs(current_price - target_strike)
+                otm_factor = math.exp(-0.5 * (dist / max(10.0, time_val * 1.2)) ** 2)
+                time_val = max(5.0, time_val * otm_factor)
 
-        # Dynamic Breakout entry trigger buffer (scaled to premium level: ~3-4% of premium)
-        entry_buffer = round(max(2.5, min(25.0, prem_ltp * 0.04)), 1)
-        prem_entry = round(prem_ltp + entry_buffer, 1)
-
-        # Stop loss points (approx 18-22% risk)
-        prem_sl_pts = round(max(6.0, min(80.0, prem_entry * 0.20)), 1)
-        prem_sl = round(max(3.0, prem_entry - prem_sl_pts), 1)
-        prem_t1 = round(prem_entry + (prem_sl_pts * 1.4), 1)
-        prem_t2 = round(prem_entry + (prem_sl_pts * 2.8), 1)
+            prem_ltp = round(max(5.0, intrinsic + time_val), 1)
+            entry_buffer = round(max(2.5, min(25.0, prem_ltp * 0.04)), 1)
+            prem_entry = round(prem_ltp + entry_buffer, 1)
+            prem_sl_pts = round(max(6.0, min(80.0, prem_entry * 0.20)), 1)
+            prem_sl = round(max(3.0, prem_entry - prem_sl_pts), 1)
+            prem_t1 = round(prem_entry + (prem_sl_pts * 1.4), 1)
+            prem_t2 = round(prem_entry + (prem_sl_pts * 2.8), 1)
 
         prem_entry_low = round(prem_ltp - 1.0, 1)
         prem_entry_high = prem_entry
@@ -724,7 +779,7 @@ class OptionSignalIndicator:
         max_risk_amount = round(lot_size * risk_per_share, 2)
         target_1_profit = round(lot_size * (prem_t1 - prem_entry), 2)
         target_2_profit = round(lot_size * (prem_t2 - prem_entry), 2)
-        contract_name = f"{sym_clean} {active_expiry_str.upper()} {strike_suggest}"
+        contract_name = f"{contract_tradingsymbol + ' - ' if contract_tradingsymbol else ''}{sym_clean} {active_expiry_str.upper()} {strike_suggest}"
 
         trade_execution = {
             "contract_name": contract_name,
@@ -746,7 +801,13 @@ class OptionSignalIndicator:
             "max_risk_amount": max_risk_amount,
             "target_1_profit": target_1_profit,
             "target_2_profit": target_2_profit,
-            "risk_reward_ratio": f"1 : {round((prem_t1 - prem_entry) / max(0.1, risk_per_share), 1)}"
+            "risk_reward_ratio": f"1 : {round((prem_t1 - prem_entry) / max(0.1, risk_per_share), 1)}",
+            "is_live_angel_one": is_live_angel_one,
+            "day_high": real_high,
+            "day_low": real_low,
+            "day_close": real_close,
+            "day_open": real_open,
+            "tradingsymbol": contract_tradingsymbol
         }
 
         generated_at_str = now_ist.strftime("%I:%M:%S %p")
@@ -833,6 +894,10 @@ class OptionSignalIndicator:
             "next_expiry": expiry_info["next_expiry"],
             "is_today_expiry": expiry_info["is_today_expiry"],
             "available_expiries": expiry_info["available_expiries"],
+            "available_strikes": available_strikes,
+            "selected_strike": target_strike,
+            "selected_option_type": target_opt_type,
+            "is_live_angel_one": is_live_angel_one,
             # Detailed Trade Execution (Lot Size, Capital, Max Risk)
             "trade_execution": trade_execution,
             # 6-Indicator Observation Checklist
