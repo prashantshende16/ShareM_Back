@@ -106,6 +106,112 @@ class OptionSignalIndicator:
         }
 
     @classmethod
+    def calculate_macd(cls, prices: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, Any]:
+        if len(prices) < slow:
+            return {"macd": 0.0, "signal": 0.0, "hist": 0.0, "trend": "NEUTRAL", "status": "NEUTRAL", "is_bull_cross": False, "is_bear_cross": False}
+        ema_fast = cls.calculate_ema(prices, fast)
+        ema_slow = cls.calculate_ema(prices, slow)
+        macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+        signal_line = cls.calculate_ema(macd_line, signal)
+        hist = [m - s for m, s in zip(macd_line, signal_line)]
+
+        cur_macd = round(macd_line[-1], 2)
+        cur_sig = round(signal_line[-1], 2)
+        cur_hist = round(hist[-1], 2)
+        prev_hist = round(hist[-2], 2) if len(hist) >= 2 else cur_hist
+
+        is_bull_cross = (cur_macd > cur_sig) and (len(macd_line) >= 2 and macd_line[-2] <= signal_line[-2])
+        is_bear_cross = (cur_macd < cur_sig) and (len(macd_line) >= 2 and macd_line[-2] >= signal_line[-2])
+        trend = "BULLISH" if cur_macd > cur_sig else "BEARISH"
+
+        return {
+            "macd": cur_macd,
+            "signal": cur_sig,
+            "hist": cur_hist,
+            "trend": trend,
+            "is_bull_cross": is_bull_cross,
+            "is_bear_cross": is_bear_cross,
+            "expanding": abs(cur_hist) > abs(prev_hist)
+        }
+
+    @staticmethod
+    def calculate_bollinger_bands(prices: List[float], period: int = 20, num_std: float = 2.0) -> Dict[str, Any]:
+        if len(prices) < period:
+            cmp = prices[-1] if prices else 0.0
+            return {"upper": cmp, "middle": cmp, "lower": cmp, "bandwidth": 0.0, "percent_b": 0.5, "is_squeeze": False}
+        window = prices[-period:]
+        sma = sum(window) / period
+        variance = sum((x - sma) ** 2 for x in window) / period
+        std_dev = math.sqrt(variance)
+        upper = sma + (num_std * std_dev)
+        lower = sma - (num_std * std_dev)
+        cmp = prices[-1]
+        bw = round(((upper - lower) / max(0.01, sma)) * 100, 2)
+        pb = round((cmp - lower) / max(0.01, upper - lower), 2)
+        return {
+            "upper": round(upper, 2),
+            "middle": round(sma, 2),
+            "lower": round(lower, 2),
+            "bandwidth": bw,
+            "percent_b": pb,
+            "is_squeeze": bw < 2.0
+        }
+
+    @staticmethod
+    def calculate_cpr_pivots(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Calculates Central Pivot Range (CPR) and classic R1/R2/S1/S2 levels.
+        Uses prior candle session range (or last 20 candles if intraday continuous).
+        """
+        if not candles or len(candles) < 5:
+            cmp = candles[-1]["close"] if candles else 0.0
+            return {"pivot": cmp, "tc": cmp, "bc": cmp, "r1": cmp, "s1": cmp, "cpr_width": "NORMAL", "position": "AT_PIVOT"}
+
+        sample = candles[-25:-1] if len(candles) >= 26 else candles[:-1]
+        if not sample:
+            sample = candles
+        high = max(c["high"] for c in sample)
+        low = min(c["low"] for c in sample)
+        close = sample[-1]["close"]
+        cmp = candles[-1]["close"]
+
+        p = round((high + low + close) / 3.0, 2)
+        bc = round((high + low) / 2.0, 2)
+        tc = round((p - bc) + p, 2)
+
+        top_c = max(tc, bc)
+        bot_c = min(tc, bc)
+
+        r1 = round((2 * p) - low, 2)
+        s1 = round((2 * p) - high, 2)
+        r2 = round(p + (high - low), 2)
+        s2 = round(p - (high - low), 2)
+
+        cpr_width_pts = round(top_c - bot_c, 2)
+        cpr_width_pct = round((cpr_width_pts / max(0.01, p)) * 100, 3)
+        width_tag = "NARROW (Trending Potential)" if cpr_width_pct < 0.15 else "WIDE (Sideways Potential)" if cpr_width_pct > 0.45 else "AVERAGE"
+
+        if cmp > top_c:
+            pos = "ABOVE_CPR (Bullish)"
+        elif cmp < bot_c:
+            pos = "BELOW_CPR (Bearish)"
+        else:
+            pos = "INSIDE_CPR (Neutral Range)"
+
+        return {
+            "pivot": p,
+            "tc": top_c,
+            "bc": bot_c,
+            "r1": r1,
+            "s1": s1,
+            "r2": r2,
+            "s2": s2,
+            "cpr_width": width_tag,
+            "cpr_width_pts": cpr_width_pts,
+            "position": pos
+        }
+
+    @classmethod
     def detect_candlestick_patterns(cls, candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Analyzes the last 1 to 3 candles to detect actionable intraday 5-min patterns.
@@ -320,12 +426,19 @@ class OptionSignalIndicator:
         symbol: Optional[str] = None,
         expiry_type: str = "current",
         selected_strike: Optional[int] = None,
-        selected_option_type: Optional[str] = None
+        selected_option_type: Optional[str] = None,
+        timeframe: str = "5m"
     ) -> Dict[str, Any]:
         """
-        Synthesizes Candlestick Patterns + EMA Ribbon + RSI + VWAP into a definitive
-        5-minute CALL vs PUT option trade signal.
+        Synthesizes Candlestick Patterns + EMA Ribbon (9/21/50/200) + RSI + VWAP +
+        MACD + Bollinger Bands + CPR Pivots + SuperTrend into an institutional
+        intraday option trade signal for 5-minute or 15-minute durations.
         """
+        is_15m = (str(timeframe).strip().lower() in ["15m", "15", "15 minute", "15min"])
+        tf_label = "15 Minute" if is_15m else "5 Minute"
+        tf_hold = "30 to 90 Minutes" if is_15m else "15 to 30 Minutes"
+        valid_duration_mins = 60 if is_15m else 30
+
         if not candles or len(candles) < 15:
             return {
                 "decision": "WAIT / NO TRADE",
@@ -339,22 +452,32 @@ class OptionSignalIndicator:
                 "target_1": 0.0,
                 "target_2": 0.0,
                 "risk_reward": "1:2.0",
+                "timeframe": tf_label,
+                "expected_holding_time": tf_hold,
                 "patterns_detected": [],
                 "indicators": {},
-                "summary": "Insufficient 5-minute candles to compute accurate option indicators."
+                "summary": f"Insufficient {tf_label} candles to compute accurate option indicators."
             }
 
         closes = [c["close"] for c in candles]
         current_price = cmp or closes[-1]
 
-        # Calculate Technical Indicators
+        # Calculate Technical Indicator Suite
         ema9 = cls.calculate_ema(closes, 9)
         ema21 = cls.calculate_ema(closes, 21)
+        ema50 = cls.calculate_ema(closes, 50)
+        ema200 = cls.calculate_ema(closes, 200)
         rsi14 = cls.calculate_rsi(closes, 14)
         vwap = cls.calculate_vwap(candles)
+        macd = cls.calculate_macd(closes)
+        bb = cls.calculate_bollinger_bands(closes)
+        cpr = cls.calculate_cpr_pivots(candles)
+        supertrend = cls.calculate_supertrend(candles)
 
         cur_ema9 = ema9[-1]
         cur_ema21 = ema21[-1]
+        cur_ema50 = ema50[-1]
+        cur_ema200 = ema200[-1]
         cur_rsi = rsi14[-1]
         cur_vwap = vwap[-1] if vwap else current_price
 
@@ -362,16 +485,30 @@ class OptionSignalIndicator:
         put_score = 0
         reasons = []
 
-        # 1. EMA 9 vs EMA 21 Trend Ribbon (25 Points)
+        # 1. EMA 9 vs EMA 21 Trend Ribbon (20 Points)
         if cur_ema9 > cur_ema21:
-            diff_pct = ((cur_ema9 - cur_ema21) / cur_ema21) * 100
-            call_score += 25
-            reasons.append(f"EMA 9 ({cur_ema9}) above EMA 21 ({cur_ema21}) - Bullish trend ribbon (+25)")
+            diff_pct = round(((cur_ema9 - cur_ema21) / cur_ema21) * 100, 2)
+            call_score += 20
+            reasons.append(f"EMA 9 ({cur_ema9}) above EMA 21 ({cur_ema21}) - Bullish trend ribbon (+20)")
         else:
-            put_score += 25
-            reasons.append(f"EMA 9 ({cur_ema9}) below EMA 21 ({cur_ema21}) - Bearish trend ribbon (+25)")
+            put_score += 20
+            reasons.append(f"EMA 9 ({cur_ema9}) below EMA 21 ({cur_ema21}) - Bearish trend ribbon (+20)")
 
-        # 2. VWAP Alignment (20 Points)
+        # 2. EMA 50 / 200 Long-Term Alignment (15 Points)
+        if current_price > cur_ema50 and cur_ema50 > cur_ema200:
+            call_score += 15
+            reasons.append(f"Price & EMA 50 ({cur_ema50}) above EMA 200 ({cur_ema200}) - Golden long-term trend (+15)")
+        elif current_price < cur_ema50 and cur_ema50 < cur_ema200:
+            put_score += 15
+            reasons.append(f"Price & EMA 50 ({cur_ema50}) below EMA 200 ({cur_ema200}) - Death cross / Bear trend (+15)")
+        elif current_price > cur_ema50:
+            call_score += 8
+            reasons.append(f"Price above 50 EMA ({cur_ema50}) (+8)")
+        else:
+            put_score += 8
+            reasons.append(f"Price below 50 EMA ({cur_ema50}) (+8)")
+
+        # 3. VWAP Alignment (20 Points)
         if current_price > cur_vwap:
             call_score += 20
             reasons.append(f"Price ({current_price}) trading above intraday VWAP ({cur_vwap}) - Buyers in control (+20)")
@@ -379,31 +516,57 @@ class OptionSignalIndicator:
             put_score += 20
             reasons.append(f"Price ({current_price}) trading below intraday VWAP ({cur_vwap}) - Sellers in control (+20)")
 
-        # 3. RSI 14 Momentum (20 Points)
+        # 4. RSI 14 Momentum (15 Points)
         if cur_rsi > 58:
-            call_score += 20
-            reasons.append(f"RSI 14 at {cur_rsi} showing bullish expansion (>58) (+20)")
+            call_score += 15
+            reasons.append(f"RSI 14 at {cur_rsi} showing bullish expansion (>58) (+15)")
         elif cur_rsi < 42:
-            put_score += 20
-            reasons.append(f"RSI 14 at {cur_rsi} showing bearish momentum breakdown (<42) (+20)")
+            put_score += 15
+            reasons.append(f"RSI 14 at {cur_rsi} showing bearish momentum breakdown (<42) (+15)")
         elif cur_rsi >= 50:
-            call_score += 10
-            reasons.append(f"RSI 14 above midpoint 50 ({cur_rsi}) (+10)")
+            call_score += 8
+            reasons.append(f"RSI 14 above midpoint 50 ({cur_rsi}) (+8)")
         else:
-            put_score += 10
-            reasons.append(f"RSI 14 below midpoint 50 ({cur_rsi}) (+10)")
+            put_score += 8
+            reasons.append(f"RSI 14 below midpoint 50 ({cur_rsi}) (+8)")
 
-        # 4. Candlestick Pattern Signals (Up to 35 Points)
+        # 5. MACD (12, 26, 9) Crossover & Histogram (15 Points)
+        if macd.get("trend") == "BULLISH":
+            call_score += 15
+            reasons.append(f"MACD line ({macd.get('macd')}) above Signal ({macd.get('signal')}) with {'Bullish Crossover' if macd.get('is_bull_cross') else 'Positive Histogram'} (+15)")
+        else:
+            put_score += 15
+            reasons.append(f"MACD line ({macd.get('macd')}) below Signal ({macd.get('signal')}) with {'Bearish Crossover' if macd.get('is_bear_cross') else 'Negative Histogram'} (+15)")
+
+        # 6. Bollinger Bands (20, 2) Position & Squeeze (10 Points)
+        if bb.get("percent_b", 0.5) > 0.6:
+            call_score += 10
+            reasons.append(f"Bollinger %B ({bb.get('percent_b')}) pushing upper band ({bb.get('upper')}) (+10)")
+        elif bb.get("percent_b", 0.5) < 0.4:
+            put_score += 10
+            reasons.append(f"Bollinger %B ({bb.get('percent_b')}) pressing lower band ({bb.get('lower')}) (+10)")
+
+        # 7. Central Pivot Range (CPR) Position (15 Points)
+        if cpr.get("position", "").startswith("ABOVE_CPR"):
+            call_score += 15
+            reasons.append(f"Price trading above Central Pivot Range (TC: {cpr.get('tc')}, Pivot: {cpr.get('pivot')}) - Bullish (+15)")
+        elif cpr.get("position", "").startswith("BELOW_CPR"):
+            put_score += 15
+            reasons.append(f"Price trading below Central Pivot Range (BC: {cpr.get('bc')}, Pivot: {cpr.get('pivot')}) - Bearish (+15)")
+        else:
+            reasons.append(f"Price inside Central Pivot Range (TC: {cpr.get('tc')}, BC: {cpr.get('bc')}) - Neutral range consolidation")
+
+        # 8. Candlestick Pattern Signals (Up to 30 Points)
         detected_patterns = cls.detect_candlestick_patterns(candles)
         for pat in detected_patterns:
             if pat["bias"] == "CALL":
                 call_score += pat["weight"]
-                reasons.append(f"{pat['name']} detected: {pat['description']} (+{pat['weight']})")
+                reasons.append(f"{pat['name']} detected on {tf_label}: {pat['description']} (+{pat['weight']})")
             elif pat["bias"] == "PUT":
                 put_score += pat["weight"]
-                reasons.append(f"{pat['name']} detected: {pat['description']} (+{pat['weight']})")
+                reasons.append(f"{pat['name']} detected on {tf_label}: {pat['description']} (+{pat['weight']})")
 
-        # 5. Volume Spike Check on Latest Candle
+        # 9. Volume Spike Check on Latest Candle
         last_candle = candles[-1]
         prev_candle = candles[-2] if len(candles) >= 2 else last_candle
         last_vol = last_candle.get("volume", 0)
@@ -411,10 +574,10 @@ class OptionSignalIndicator:
         if last_vol > prev_vol * 1.3 and last_vol > 0:
             if last_candle["close"] > last_candle["open"]:
                 call_score += 10
-                reasons.append("Volume surge (+30%) on green 5-minute candle confirming buyers (+10)")
+                reasons.append(f"Volume surge (+30%) on green {tf_label} candle confirming buyers (+10)")
             else:
                 put_score += 10
-                reasons.append("Volume surge (+30%) on red 5-minute candle confirming sellers (+10)")
+                reasons.append(f"Volume surge (+30%) on red {tf_label} candle confirming sellers (+10)")
 
         # Determine Decision & Confidence
         total_points = call_score + put_score
@@ -675,7 +838,7 @@ class OptionSignalIndicator:
             )
 
         # -------------------------------------------------------------
-        # 6-INDICATOR CONFLUENCE CHECKLIST (High-Accuracy Observation Matrix)
+        # 10-INDICATOR CONFLUENCE CHECKLIST (High-Accuracy Observation Matrix)
         # -------------------------------------------------------------
         # 1. EMA 9 / 21 Trend Ribbon
         ema_bias = "CALL" if cur_ema9 > cur_ema21 else "PUT"
@@ -686,14 +849,26 @@ class OptionSignalIndicator:
             "bias": ema_bias,
             "status": "CONFIRMED" if ema_confirmed else "CONFLICT",
             "value": f"EMA9: {round(cur_ema9, 2)} | EMA21: {round(cur_ema21, 2)}",
-            "description": f"EMA 9 is trading {'above' if ema_bias == 'CALL' else 'below'} EMA 21 ({'Bullish Expansion' if ema_bias == 'CALL' else 'Bearish Expansion'})"
+            "description": f"EMA 9 is trading {'above' if ema_bias == 'CALL' else 'below'} EMA 21 ({'Bullish Ribbon' if ema_bias == 'CALL' else 'Bearish Ribbon'})"
         }
 
-        # 2. Intraday VWAP Position
-        vwap_bias = "CALL" if current_price > cur_vwap else "PUT"
-        vwap_confirmed = (vwap_bias == direction)
+        # 2. EMA 50 / 200 Long-Term Trend
+        ema50_200_bias = "CALL" if current_price > cur_ema50 and cur_ema50 > cur_ema200 else ("PUT" if current_price < cur_ema50 and cur_ema50 < cur_ema200 else ("CALL" if current_price > cur_ema50 else "PUT"))
+        ema50_200_confirmed = (ema50_200_bias == direction)
         ind_2 = {
             "id": 2,
+            "name": "EMA 50 / 200 Trend Filter",
+            "bias": ema50_200_bias,
+            "status": "CONFIRMED" if ema50_200_confirmed else "CONFLICT",
+            "value": f"EMA50: {round(cur_ema50, 1)} | EMA200: {round(cur_ema200, 1)}",
+            "description": f"Price is trading {'above 50/200 EMA (Structural Bullish)' if ema50_200_bias == 'CALL' else 'below 50/200 EMA (Structural Bearish)'}"
+        }
+
+        # 3. Intraday VWAP Position
+        vwap_bias = "CALL" if current_price > cur_vwap else "PUT"
+        vwap_confirmed = (vwap_bias == direction)
+        ind_3 = {
+            "id": 3,
             "name": "Intraday VWAP Alignment",
             "bias": vwap_bias,
             "status": "CONFIRMED" if vwap_confirmed else "CONFLICT",
@@ -701,7 +876,7 @@ class OptionSignalIndicator:
             "description": f"Price is trading {'above VWAP (Buyers in command)' if vwap_bias == 'CALL' else 'below VWAP (Sellers in command)'}"
         }
 
-        # 3. RSI 14 Momentum
+        # 4. RSI 14 Momentum
         if cur_rsi >= 54:
             rsi_bias = "CALL"
         elif cur_rsi <= 46:
@@ -709,33 +884,59 @@ class OptionSignalIndicator:
         else:
             rsi_bias = "NEUTRAL"
         rsi_confirmed = (rsi_bias == direction)
-        ind_3 = {
-            "id": 3,
+        ind_4 = {
+            "id": 4,
             "name": "RSI 14 Momentum",
             "bias": rsi_bias,
             "status": "CONFIRMED" if rsi_confirmed else ("NEUTRAL" if rsi_bias == "NEUTRAL" else "CONFLICT"),
             "value": f"RSI: {cur_rsi}",
-            "description": f"RSI at {cur_rsi} showing {'Bullish momentum expansion (>54)' if rsi_bias == 'CALL' else 'Bearish momentum breakdown (<46)' if rsi_bias == 'PUT' else 'Mid-range consolidation'}"
+            "description": f"RSI at {cur_rsi} showing {'Bullish expansion (>54)' if rsi_bias == 'CALL' else 'Bearish breakdown (<46)' if rsi_bias == 'PUT' else 'Consolidation'}"
         }
 
-        # 4. Candlestick Price Action (5-Min)
-        pat_bias = detected_patterns[0]["bias"] if detected_patterns else "NEUTRAL"
-        pat_confirmed = (pat_bias == direction)
-        ind_4 = {
-            "id": 4,
-            "name": "5-Min Candlestick Pattern",
-            "bias": pat_bias,
-            "status": "CONFIRMED" if pat_confirmed else "NEUTRAL",
-            "value": detected_patterns[0]["name"] if detected_patterns else "Consolidation Bar",
-            "description": detected_patterns[0]["description"] if detected_patterns else "Price holding normal range"
+        # 5. MACD (12, 26, 9) Histogram & Crossover
+        macd_bias = "CALL" if macd.get("trend") == "BULLISH" else "PUT"
+        macd_confirmed = (macd_bias == direction)
+        ind_5 = {
+            "id": 5,
+            "name": "MACD (12, 26, 9) Momentum",
+            "bias": macd_bias,
+            "status": "CONFIRMED" if macd_confirmed else "CONFLICT",
+            "value": f"MACD: {macd.get('macd')} | Sig: {macd.get('signal')} | Hist: {macd.get('hist')}",
+            "description": f"MACD is {macd_bias} with {'Bullish Cross' if macd.get('is_bull_cross') else 'Bearish Cross' if macd.get('is_bear_cross') else ('Expanding Histogram' if macd.get('expanding') else 'Neutral Flow')}"
         }
 
-        # 5. SuperTrend (10, 3) / ATR Trailing Band
+        # 6. Bollinger Bands (20, 2) Position & Squeeze
+        bb_pct = bb.get("percent_b", 0.5)
+        bb_bias = "CALL" if bb_pct > 0.55 else ("PUT" if bb_pct < 0.45 else "NEUTRAL")
+        bb_confirmed = (bb_bias == direction)
+        ind_6 = {
+            "id": 6,
+            "name": "Bollinger Bands (20, 2)",
+            "bias": bb_bias,
+            "status": "CONFIRMED" if bb_confirmed else "NEUTRAL",
+            "value": f"%B: {bb_pct} | BW: {bb.get('bandwidth')}%",
+            "description": f"{'Volatility Squeeze - Ready for breakout' if bb.get('is_squeeze') else ('Expanding along Upper Band' if bb_bias == 'CALL' else 'Testing Lower Band' if bb_bias == 'PUT' else 'Within Middle Band')}"
+        }
+
+        # 7. Central Pivot Range (CPR) & Classic Levels
+        cpr_pos = cpr.get("position", "")
+        cpr_bias = "CALL" if cpr_pos.startswith("ABOVE") else ("PUT" if cpr_pos.startswith("BELOW") else "NEUTRAL")
+        cpr_confirmed = (cpr_bias == direction)
+        ind_7 = {
+            "id": 7,
+            "name": "CPR Pivot Boundary",
+            "bias": cpr_bias,
+            "status": "CONFIRMED" if cpr_confirmed else "NEUTRAL",
+            "value": f"TC: {cpr.get('tc')} | P: {cpr.get('pivot')} | BC: {cpr.get('bc')}",
+            "description": f"Price is {cpr_pos} ({cpr.get('cpr_width')})"
+        }
+
+        # 8. SuperTrend (10, 3) / ATR Trailing Band
         st_trend = supertrend.get("trend", "NEUTRAL")
         st_bias = "CALL" if st_trend == "BULLISH" else "PUT"
         st_confirmed = (st_bias == direction)
-        ind_5 = {
-            "id": 5,
+        ind_8 = {
+            "id": 8,
             "name": "SuperTrend (10, 3) / ATR Trail",
             "bias": st_bias,
             "status": "CONFIRMED" if st_confirmed else "CONFLICT",
@@ -743,32 +944,44 @@ class OptionSignalIndicator:
             "description": f"SuperTrend is {st_bias} ({'Price above trailing support' if st_bias == 'CALL' else 'Price below trailing resistance'})"
         }
 
-        # 6. Volume Expansion & Surge Filter
+        # 9. Candlestick Price Action
+        pat_bias = detected_patterns[0]["bias"] if detected_patterns else "NEUTRAL"
+        pat_confirmed = (pat_bias == direction)
+        ind_9 = {
+            "id": 9,
+            "name": f"{tf_label} Candlestick Pattern",
+            "bias": pat_bias,
+            "status": "CONFIRMED" if pat_confirmed else "NEUTRAL",
+            "value": detected_patterns[0]["name"] if detected_patterns else "Consolidation Bar",
+            "description": detected_patterns[0]["description"] if detected_patterns else f"Price holding normal {tf_label} range"
+        }
+
+        # 10. Volume Expansion & Surge Filter
         is_vol_surge = (last_vol > prev_vol * 1.25 and last_vol > 0)
         vol_candle_bull = (last_candle["close"] > last_candle["open"])
         vol_bias = ("CALL" if vol_candle_bull else "PUT") if is_vol_surge else "NEUTRAL"
         vol_confirmed = (vol_bias == direction)
-        ind_6 = {
-            "id": 6,
+        ind_10 = {
+            "id": 10,
             "name": "Volume Surge Filter",
             "bias": vol_bias,
             "status": "CONFIRMED" if vol_confirmed else "NEUTRAL",
             "value": f"Vol: {last_vol:,}" if last_vol > 0 else "Normal Volume",
-            "description": "Volume surged +25% on 5m trigger candle" if is_vol_surge else "Standard volume flow"
+            "description": f"Volume surged +25% on {tf_label} trigger candle" if is_vol_surge else "Standard volume flow"
         }
 
-        indicator_checklist = [ind_1, ind_2, ind_3, ind_4, ind_5, ind_6]
+        indicator_checklist = [ind_1, ind_2, ind_3, ind_4, ind_5, ind_6, ind_7, ind_8, ind_9, ind_10]
         confirmed_count = sum(1 for ind in indicator_checklist if ind["status"] == "CONFIRMED")
-        confluence_pct = int(round((confirmed_count / 6.0) * 100))
+        confluence_pct = int(round((confirmed_count / 10.0) * 100))
         verdict = (
-            "STRONG CONFLUENCE (High Probability Setup)" if confirmed_count >= 5
-            else "GOOD CONFLUENCE (Tradeable Setup)" if confirmed_count >= 4
-            else "MODERATE CONFLUENCE (Caution / Wait)" if confirmed_count == 3
+            "STRONG CONFLUENCE (High Probability Setup)" if confirmed_count >= 8
+            else "GOOD CONFLUENCE (Tradeable Setup)" if confirmed_count >= 6
+            else "MODERATE CONFLUENCE (Caution / Wait)" if confirmed_count >= 4
             else "WEAK CONFLUENCE (Consolidation)"
         )
         confluence_score = {
             "confirmed": confirmed_count,
-            "total": 6,
+            "total": 10,
             "percentage": confluence_pct,
             "verdict": verdict
         }
@@ -812,10 +1025,10 @@ class OptionSignalIndicator:
 
         generated_at_str = now_ist.strftime("%I:%M:%S %p")
         generated_at_iso = now_ist.isoformat()
-        valid_until_dt = now_ist + timedelta(minutes=30)
+        valid_until_dt = now_ist + timedelta(minutes=valid_duration_mins)
         valid_until_str = valid_until_dt.strftime("%I:%M:%S %p")
 
-        # Extract last 5m candle timestamp if available
+        # Extract last candle timestamp if available
         last_candle_epoch = candles[-1].get("time") if candles else None
         last_candle_time_str = None
         if last_candle_epoch:
@@ -854,10 +1067,10 @@ class OptionSignalIndicator:
             e_ltp = round(max(5.0, intrinsic + (base_prem * e_t_mult)), 1)
             e_buf = round(max(2.5, min(25.0, e_ltp * 0.04)), 1)
             e_entry = round(e_ltp + e_buf, 1)
-            e_sl_pts = round(max(6.0, min(80.0, e_entry * 0.20)), 1)
+            e_sl_pts = round(max(6.0, min(80.0, e_entry * (0.25 if is_15m else 0.20))), 1)
             e_sl = max(3.0, round(e_entry - e_sl_pts, 1))
-            e_t1 = round(e_entry + (e_sl_pts * 1.4), 1)
-            e_t2 = round(e_entry + (e_sl_pts * 2.8), 1)
+            e_t1 = round(e_entry + (e_sl_pts * (1.6 if is_15m else 1.4)), 1)
+            e_t2 = round(e_entry + (e_sl_pts * (3.0 if is_15m else 2.8)), 1)
 
             entry_dict = {
                 "expiry": exp["date"],
@@ -900,7 +1113,7 @@ class OptionSignalIndicator:
             "is_live_angel_one": is_live_angel_one,
             # Detailed Trade Execution (Lot Size, Capital, Max Risk)
             "trade_execution": trade_execution,
-            # 6-Indicator Observation Checklist
+            # 10-Indicator Observation Checklist
             "indicator_checklist": indicator_checklist,
             "confluence_score": confluence_score,
             # Option Premium (₹ Rupees Price traded on broker)
@@ -928,8 +1141,8 @@ class OptionSignalIndicator:
             "target_1": target_1,
             "target_2": target_2,
             "risk_reward": f"1 : {round(t1_points / sl_points, 1)}",
-            "timeframe": "5 Minute",
-            "expected_holding_time": "15 to 30 Minutes",
+            "timeframe": tf_label,
+            "expected_holding_time": tf_hold,
             "generated_at": generated_at_str,
             "generated_at_iso": generated_at_iso,
             "valid_until": valid_until_str,
@@ -938,8 +1151,13 @@ class OptionSignalIndicator:
             "indicators": {
                 "ema_9": round(cur_ema9, 2),
                 "ema_21": round(cur_ema21, 2),
+                "ema_50": round(cur_ema50, 2),
+                "ema_200": round(cur_ema200, 2),
                 "rsi_14": cur_rsi,
                 "vwap": cur_vwap,
+                "macd": macd,
+                "bollinger": bb,
+                "cpr": cpr,
                 "supertrend": supertrend.get("trend"),
                 "trend_ribbon": "BULLISH" if cur_ema9 > cur_ema21 else "BEARISH",
                 "vwap_position": "ABOVE_VWAP" if current_price > cur_vwap else "BELOW_VWAP"

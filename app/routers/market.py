@@ -25,6 +25,38 @@ class LiveAnalysisRequest(BaseModel):
     notes: Optional[str] = None
     ai_provider: Optional[str] = None
 
+class AIStrategyAgentRequest(BaseModel):
+    symbol: str = "NIFTY 50"
+    expiry_type: str = "current"
+    timeframe: str = "5m"
+
+@router.get("/global-radar")
+def get_global_market_radar():
+    """
+    Returns comprehensive Global Market Radar tracking US, UK/Europe, Asia,
+    Commodities (Crude Oil, Gold), USD/INR, and live news tally at current timing.
+    """
+    radar = LiveMarketService.get_global_market_radar()
+    return {
+        "status": "success",
+        "data": radar
+    }
+
+@router.post("/ai-strategy-agent")
+async def run_ai_market_strategy_agent(payload: AIStrategyAgentRequest):
+    """
+    AI Live Market Strategy Agent:
+    Blends Angel One SmartAPI live quotes + 5m/15m multi-indicator technicals +
+    US/UK/European market movements + real-time breaking news through Google Gemini AI.
+    """
+    from app.services.ai.market_strategy_agent import AIMarketStrategyAgent
+    result = await AIMarketStrategyAgent.synthesize_market_strategy(
+        symbol=payload.symbol,
+        expiry_type=payload.expiry_type,
+        timeframe=payload.timeframe
+    )
+    return result
+
 @router.get("/overview")
 def get_live_overview():
     """
@@ -59,28 +91,31 @@ def get_option_indicator_signal(
     symbol: str = Query(default="NIFTY 50"),
     expiry_type: str = Query(default="current", description="Expiry preference: 'current' or 'next'"),
     strike: Optional[int] = Query(default=None, description="Specific strike to evaluate"),
-    option_type: Optional[str] = Query(default=None, description="Option type: 'CE' or 'PE'")
+    option_type: Optional[str] = Query(default=None, description="Option type: 'CE' or 'PE'"),
+    timeframe: str = Query(default="5m", description="Candle timeframe: '5m' or '15m'")
 ):
     """
-    Dedicated 5-Minute Option Indicator Decision Endpoint.
-    Evaluates 5-Minute candles with:
+    Dedicated 5-Minute and 15-Minute Option Indicator Decision Endpoint.
+    Evaluates 5m or 15m candles with:
     - Candlestick patterns (Hammer, Shooting Star, Engulfing, Morning/Evening Star, Pinbars)
-    - EMA 9/21 Ribbon
+    - EMA 9/21 Ribbon & EMA 50/200 Long-Term Trend
     - RSI 14 Momentum
-    - VWAP Alignment
-    - Volume Spikes
+    - Intraday VWAP Alignment
+    - MACD (12, 26, 9) Histogram & Crossover
+    - Bollinger Bands (20, 2) Squeeze & Position
+    - Central Pivot Range (CPR) & Classic Levels
+    - Volume Spikes & Institutional Filter
     - Real-Time Live Option Chain Quotes from Angel One SmartAPI
-    Returns definitive 5-Min BUY CALL (CE) / BUY PUT (PE) / WAIT decision, strike recommendation, SL & Targets.
-    Supports Current Weekly (0DTE) vs Next Weekly contract and user-selectable strike contracts.
+    Returns definitive BUY CALL (CE) / BUY PUT (PE) / WAIT decision, strike recommendation, SL & Targets.
     """
     from app.services.technical_analysis.option_indicator import OptionSignalIndicator
-    
+
     yf_sym = LiveMarketService.resolve_symbol(symbol)
-    data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="5d")
+    interval = "15m" if timeframe.lower() in ["15m", "15", "15min"] else "5m"
+    data = LiveMarketService.get_candle_data(yf_sym, interval=interval, range_="5d")
     if not data or not data.get("candles"):
-        # Fallback to 1d
-        data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="1d")
-        
+        data = LiveMarketService.get_candle_data(yf_sym, interval=interval, range_="1d")
+
     candles = data.get("candles", []) if data else []
     cmp = data.get("current_price") if data else None
     signal = OptionSignalIndicator.evaluate_5m_option_signal(
@@ -89,23 +124,26 @@ def get_option_indicator_signal(
         symbol=symbol,
         expiry_type=expiry_type,
         selected_strike=strike,
-        selected_option_type=option_type
+        selected_option_type=option_type,
+        timeframe=timeframe
     )
-    
+
     return {
         "status": "success",
         "symbol": symbol,
         "yf_symbol": yf_sym,
         "expiry_type": expiry_type,
+        "timeframe": timeframe,
         "signal": signal
     }
 
 @router.get("/all-option-signals")
 def get_all_option_indicator_signals(
-    expiry_type: str = Query(default="current", description="Expiry preference: 'current' or 'next'")
+    expiry_type: str = Query(default="current", description="Expiry preference: 'current' or 'next'"),
+    timeframe: str = Query(default="5m", description="Candle timeframe: '5m' or '15m'")
 ):
     """
-    Evaluates 5-Minute Option Indicator Decisions for ALL Major Indian Indices in parallel:
+    Evaluates 5-Minute or 15-Minute Option Indicator Decisions for ALL Major Indian Indices in parallel:
     - NIFTY 50
     - BANK NIFTY
     - SENSEX
@@ -114,19 +152,23 @@ def get_all_option_indicator_signals(
     Recalculates all signals starting from the exact refresh time onward.
     """
     from app.services.technical_analysis.option_indicator import OptionSignalIndicator
-    
+
     symbols = ["NIFTY 50", "BANK NIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"]
     results = {}
-    
+    interval = "15m" if timeframe.lower() in ["15m", "15", "15min"] else "5m"
+    valid_mins = 60 if interval == "15m" else 30
+
     def process_sym(sym):
         try:
             yf_sym = LiveMarketService.resolve_symbol(sym)
-            data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="5d")
+            data = LiveMarketService.get_candle_data(yf_sym, interval=interval, range_="5d")
             if not data or not data.get("candles"):
-                data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="1d")
+                data = LiveMarketService.get_candle_data(yf_sym, interval=interval, range_="1d")
             candles = data.get("candles", []) if data else []
             cmp = data.get("current_price") if data else None
-            sig = OptionSignalIndicator.evaluate_5m_option_signal(candles, cmp, symbol=sym, expiry_type=expiry_type)
+            sig = OptionSignalIndicator.evaluate_5m_option_signal(
+                candles, cmp, symbol=sym, expiry_type=expiry_type, timeframe=timeframe
+            )
             return sym, sig
         except Exception as e:
             logger.warning(f"Error evaluating all-market signal for {sym}: {e}")
@@ -146,7 +188,8 @@ def get_all_option_indicator_signals(
         "status": "success",
         "timestamp": now_ist.strftime("%I:%M:%S %p"),
         "timestamp_iso": now_ist.isoformat(),
-        "valid_until": (now_ist + timedelta(minutes=30)).strftime("%I:%M:%S %p"),
+        "valid_until": (now_ist + timedelta(minutes=valid_mins)).strftime("%I:%M:%S %p"),
+        "timeframe": "15 Minute" if interval == "15m" else "5 Minute",
         "total_markets": len(results),
         "signals": results
     }

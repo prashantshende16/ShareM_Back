@@ -33,15 +33,26 @@ SYMBOL_MAPPINGS = {
     "ITC": "ITC.NS"
 }
 
-# Major global market indices to track
+# Major global market indices to track (US, UK/Europe, Asia, Commodities, Forex)
 GLOBAL_INDICES = [
-    {"name": "Dow Jones (US)", "symbol": "^DJI", "region": "US"},
-    {"name": "Nasdaq (US)", "symbol": "^IXIC", "region": "US"},
-    {"name": "S&P 500 (US)", "symbol": "^GSPC", "region": "US"},
-    {"name": "Nikkei 225 (Japan)", "symbol": "^N225", "region": "Asia"},
-    {"name": "FTSE 100 (UK)", "symbol": "^FTSE", "region": "Europe"},
-    {"name": "Crude Oil WTI", "symbol": "CL=F", "region": "Commodity"},
-    {"name": "India VIX", "symbol": "^INDIAVIX", "region": "India"},
+    # US Markets
+    {"name": "Dow Jones", "symbol": "^DJI", "region": "US", "code": "US_DOW"},
+    {"name": "S&P 500", "symbol": "^GSPC", "region": "US", "code": "US_SP500"},
+    {"name": "Nasdaq 100", "symbol": "^IXIC", "region": "US", "code": "US_NASDAQ"},
+    {"name": "US 10Y Yield", "symbol": "^TNX", "region": "US", "code": "US_10Y"},
+    {"name": "US VIX", "symbol": "^VIX", "region": "US", "code": "US_VIX"},
+    # UK & European Markets
+    {"name": "FTSE 100 (UK)", "symbol": "^FTSE", "region": "UK", "code": "UK_FTSE"},
+    {"name": "DAX 40 (Germany)", "symbol": "^GDAXI", "region": "Europe", "code": "EU_DAX"},
+    {"name": "CAC 40 (France)", "symbol": "^FCHI", "region": "Europe", "code": "EU_CAC"},
+    # Asian Markets
+    {"name": "Nikkei 225 (Japan)", "symbol": "^N225", "region": "Asia", "code": "ASIA_NIKKEI"},
+    {"name": "Hang Seng (HK)", "symbol": "^HSI", "region": "Asia", "code": "ASIA_HSI"},
+    # Commodities & Forex
+    {"name": "Crude Oil WTI", "symbol": "CL=F", "region": "Commodity", "code": "COMM_CRUDE"},
+    {"name": "Gold Futures", "symbol": "GC=F", "region": "Commodity", "code": "COMM_GOLD"},
+    {"name": "USD / INR", "symbol": "USDINR=X", "region": "Forex", "code": "FX_USDINR"},
+    {"name": "India VIX", "symbol": "^INDIAVIX", "region": "India", "code": "IND_VIX"},
 ]
 
 # Nifty 50 Top Heavyweight Movers & Bank Contributors
@@ -261,6 +272,92 @@ class LiveMarketService:
         return {
             "global_sentiment": global_sentiment,
             "indices": overview
+        }
+
+    @classmethod
+    def get_global_market_radar(cls) -> Dict[str, Any]:
+        """
+        Comprehensive World Market & News Radar.
+        Collates US, UK/European, Asian markets, Commodities (Crude/Gold), USD/INR
+        and live news headlines tally at current timing.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        def fetch_index(item):
+            try:
+                data = cls.get_candle_data(item["symbol"], interval="5m", range_="1d")
+                if data:
+                    chg_pct = data["change_pct"]
+                    return {
+                        "name": item["name"],
+                        "symbol": item["symbol"],
+                        "region": item["region"],
+                        "code": item.get("code", ""),
+                        "price": data["current_price"],
+                        "change": data["change"],
+                        "change_pct": chg_pct,
+                        "sentiment": "bullish" if chg_pct > 0.1 else "bearish" if chg_pct < -0.1 else "neutral"
+                    }
+            except Exception as e:
+                logger.warning(f"Error fetching global radar item {item['name']}: {e}")
+            return None
+
+        radar_items = []
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            futures = [executor.submit(fetch_index, it) for it in GLOBAL_INDICES]
+            for f in futures:
+                res = f.result()
+                if res:
+                    radar_items.append(res)
+
+        # Region breakdowns
+        us_items = [x for x in radar_items if x["region"] == "US"]
+        uk_items = [x for x in radar_items if x["region"] in ["UK", "Europe"]]
+        asia_items = [x for x in radar_items if x["region"] == "Asia"]
+        commodities = [x for x in radar_items if x["region"] in ["Commodity", "Forex", "India"]]
+
+        us_chg_avg = sum(x["change_pct"] for x in us_items if not x["symbol"] in ["^VIX", "^TNX"]) / max(1, len([x for x in us_items if not x["symbol"] in ["^VIX", "^TNX"]]))
+        uk_chg_avg = sum(x["change_pct"] for x in uk_items) / max(1, len(uk_items))
+
+        us_stance = "Bullish" if us_chg_avg > 0.2 else ("Bearish" if us_chg_avg < -0.2 else "Mixed / Flat")
+        uk_stance = "Bullish" if uk_chg_avg > 0.2 else ("Bearish" if uk_chg_avg < -0.2 else "Mixed / Flat")
+
+        crude = next((x for x in commodities if "Crude" in x["name"]), None)
+        crude_bias = "Neutral"
+        if crude:
+            if crude["change_pct"] > 1.2:
+                crude_bias = "Headwind (Crude Rising - Bearish for Indian Equities)"
+            elif crude["change_pct"] < -1.2:
+                crude_bias = "Tailwind (Crude Softening - Bullish for Indian Equities)"
+            else:
+                crude_bias = "Stable (No major crude shock)"
+
+        news_tally = cls.get_market_incidents_news()
+
+        # Overall global score (-100 to +100)
+        score = int(round((us_chg_avg * 40) + (uk_chg_avg * 30)))
+        score = max(-100, min(100, score))
+
+        if score >= 25:
+            global_verdict = "Risk-On (Strong Global Tailwind for India)"
+        elif score <= -25:
+            global_verdict = "Risk-Off (Global Selling Pressure / Caution)"
+        else:
+            global_verdict = "Neutral / Domestic Driven Market"
+
+        return {
+            "global_verdict": global_verdict,
+            "global_score": score,
+            "us_market_stance": us_stance,
+            "us_avg_change": round(us_chg_avg, 2),
+            "uk_market_stance": uk_stance,
+            "uk_avg_change": round(uk_chg_avg, 2),
+            "crude_oil_status": crude_bias,
+            "us_indices": us_items,
+            "uk_europe_indices": uk_items,
+            "asia_indices": asia_items,
+            "commodities_and_forex": commodities,
+            "news_tally": news_tally
         }
 
     @classmethod
