@@ -134,3 +134,47 @@ class WatchlistItem(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     last_analysis = relationship("Analysis")
+
+
+class TradePosition(Base):
+    __tablename__ = "trade_positions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(50), nullable=False, index=True)  # e.g. "NIFTY 50", "SENSEX", "BANK NIFTY", "FINNIFTY"
+    contract_name = Column(String(150), nullable=False)  # e.g. "NIFTY 50 26 OCT 2026 22700 CE"
+    exchange = Column(String(20), default="NFO")
+    tradingsymbol = Column(String(100), nullable=True)  # e.g. "NIFTY26OCT2622700CE"
+    symboltoken = Column(String(50), nullable=True)
+    action = Column(String(20), default="BUY")  # "BUY" or "SELL"
+    option_type = Column(String(10), default="CE")  # "CE" or "PE"
+    strike_price = Column(Float, nullable=True)
+    expiry = Column(String(50), nullable=True)
+    timeframe = Column(String(20), default="5m")  # "5m" or "15m"
+
+    lots = Column(Integer, default=1)
+    lot_size = Column(Integer, default=25)
+    quantity = Column(Integer, default=25)
+
+    entry_price = Column(Float, nullable=False)  # Buy trigger entry
+    current_ltp = Column(Float, nullable=False)
+    stop_loss = Column(Float, nullable=False)
+    target_1 = Column(Float, nullable=False)
+    target_2 = Column(Float, nullable=False)
+
+    margin_required = Column(Float, default=0.0)
+    max_risk = Column(Float, default=0.0)
+    target_1_profit = Column(Float, default=0.0)
+    target_2_profit = Column(Float, default=0.0)
+    realized_pnl = Column(Float, default=0.0)
+
+    # Status: "ACTIVE", "TARGET_1_BOOKED", "TARGET_2_BOOKED", "STOPPED_OUT", "CLOSED", "CANCELLED"
+    status = Column(String(50), default="ACTIVE", index=True)
+    trade_mode = Column(String(20), default="PAPER")  # "PAPER" or "LIVE"
+    angel_order_id = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+
+    entry_time = Column(DateTime, default=datetime.utcnow)
+    exit_time = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

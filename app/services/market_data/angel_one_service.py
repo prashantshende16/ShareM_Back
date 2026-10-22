@@ -508,3 +508,87 @@ class AngelOneService:
 
         return None
 
+    @classmethod
+    def get_profile(cls) -> Dict[str, Any]:
+        """Fetch client profile from Angel One SmartAPI."""
+        login_res = cls.login_sync()
+        if not login_res.get("status"):
+            return {"status": False, "message": login_res.get("message", "Not logged in")}
+        token = login_res.get("token")
+        try:
+            url = f"{cls.BASE_URL}/rest/secure/angelbroking/user/v1/getProfile"
+            headers = cls.get_headers(token)
+            with httpx.Client(timeout=6.0) as client:
+                res = client.get(url, headers=headers)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data
+        except Exception as e:
+            logger.warning(f"Error fetching Angel One profile: {e}")
+            return {"status": False, "message": str(e)}
+        return {"status": False, "message": "Failed to fetch profile"}
+
+    @classmethod
+    def get_rms(cls) -> Dict[str, Any]:
+        """Fetch RMS / Funds and Margin details from Angel One SmartAPI."""
+        login_res = cls.login_sync()
+        if not login_res.get("status"):
+            return {"status": False, "message": login_res.get("message", "Not logged in")}
+        token = login_res.get("token")
+        try:
+            url = f"{cls.BASE_URL}/rest/secure/angelbroking/user/v1/getRMS"
+            headers = cls.get_headers(token)
+            with httpx.Client(timeout=6.0) as client:
+                res = client.get(url, headers=headers)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data
+        except Exception as e:
+            logger.warning(f"Error fetching Angel One RMS: {e}")
+            return {"status": False, "message": str(e)}
+        return {"status": False, "message": "Failed to fetch RMS funds"}
+
+    @classmethod
+    def place_order(
+        cls,
+        tradingsymbol: str,
+        symboltoken: str,
+        exchange: str,
+        transactiontype: str,
+        quantity: int,
+        price: float = 0.0,
+        ordertype: str = "MARKET",
+        producttype: str = "INTRADAY"
+    ) -> Dict[str, Any]:
+        """Place live order via Angel One SmartAPI."""
+        login_res = cls.login_sync()
+        if not login_res.get("status"):
+            return {"status": False, "message": login_res.get("message", "Not logged in")}
+        token = login_res.get("token")
+        try:
+            url = f"{cls.BASE_URL}/rest/secure/angelbroking/order/v1/placeOrder"
+            headers = cls.get_headers(token)
+            payload = {
+                "variety": "NORMAL",
+                "tradingsymbol": tradingsymbol,
+                "symboltoken": symboltoken,
+                "transactiontype": transactiontype.upper(),
+                "exchange": exchange,
+                "ordertype": ordertype.upper(),
+                "producttype": producttype.upper(),
+                "duration": "DAY",
+                "price": str(price) if ordertype.upper() != "MARKET" else "0",
+                "squareoff": "0",
+                "stoploss": "0",
+                "quantity": str(quantity)
+            }
+            with httpx.Client(timeout=8.0) as client:
+                res = client.post(url, json=payload, headers=headers)
+                if res.status_code == 200:
+                    return res.json()
+                return {"status": False, "message": f"HTTP {res.status_code}: {res.text}"}
+        except Exception as e:
+            logger.warning(f"Error placing Angel One order: {e}")
+            return {"status": False, "message": str(e)}
+
+
