@@ -133,11 +133,38 @@ def list_trades(
     
     trades = query.order_by(desc(TradePosition.created_at)).all()
 
+    # Dynamically update live tick LTP for active positions
+    for t in trades:
+        if t.status in ["ACTIVE", "TARGET_1_BOOKED"]:
+            try:
+                base_kw = "BANKNIFTY" if "BANK" in t.symbol.upper() else (
+                    "SENSEX" if "SENSEX" in t.symbol.upper() else (
+                        "FINNIFTY" if "FIN" in t.symbol.upper() else "NIFTY"
+                    )
+                )
+                quote = AngelOneService.fetch_option_contract_ltp(
+                    base_keyword=base_kw,
+                    strike=t.strike_price or 0.0,
+                    option_type=t.option_type or "CE",
+                    expiry_str=t.expiry or "",
+                    exchange=t.exchange or "NFO"
+                )
+                if quote and quote.get("ltp") and quote["ltp"] > 0:
+                    t.current_ltp = float(quote["ltp"])
+                    db.commit()
+            except Exception:
+                pass
+
     result = []
     for t in trades:
         # Calculate current unrealized P&L
         unrealized = round((t.current_ltp - t.entry_price) * t.quantity, 2) if t.status in ["ACTIVE", "TARGET_1_BOOKED"] else 0.0
         pnl_pct = round(((t.current_ltp - t.entry_price) / max(0.1, t.entry_price)) * 100, 2) if t.entry_price > 0 else 0.0
+
+        is_call = t.option_type == "CE"
+        target_1_hit = (t.current_ltp >= t.target_1) if is_call else (t.current_ltp <= t.target_1)
+        target_2_hit = (t.current_ltp >= t.target_2) if is_call else (t.current_ltp <= t.target_2)
+        sl_hit = (t.current_ltp <= t.stop_loss) if is_call else (t.current_ltp >= t.stop_loss)
 
         item = {
             "id": t.id,
@@ -167,6 +194,9 @@ def list_trades(
             "pnl_percentage": pnl_pct,
             "realized_pnl": t.realized_pnl,
             "status": t.status,
+            "is_target_1_hit": target_1_hit and t.status == "ACTIVE",
+            "is_target_2_hit": target_2_hit and t.status in ["ACTIVE", "TARGET_1_BOOKED"],
+            "is_sl_hit": sl_hit and t.status in ["ACTIVE", "TARGET_1_BOOKED"],
             "trade_mode": t.trade_mode,
             "angel_order_id": t.angel_order_id,
             "notes": t.notes,
