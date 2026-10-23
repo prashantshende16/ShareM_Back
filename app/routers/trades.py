@@ -1,6 +1,9 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+logger = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -137,34 +140,51 @@ def list_trades(
     for t in trades:
         if t.status in ["ACTIVE", "TARGET_1_BOOKED"]:
             try:
-                base_kw = "BANKNIFTY" if "BANK" in t.symbol.upper() else (
-                    "SENSEX" if "SENSEX" in t.symbol.upper() else (
-                        "FINNIFTY" if "FIN" in t.symbol.upper() else "NIFTY"
+                live_ltp = None
+                if t.symboltoken and t.tradingsymbol:
+                    live_ltp = AngelOneService.get_contract_ltp_sync(
+                        exchange=t.exchange,
+                        tradingsymbol=t.tradingsymbol,
+                        symboltoken=t.symboltoken
                     )
-                )
-                quote = AngelOneService.fetch_option_contract_ltp(
-                    base_keyword=base_kw,
-                    strike=t.strike_price or 0.0,
-                    option_type=t.option_type or "CE",
-                    expiry_str=t.expiry or "",
-                    exchange=t.exchange or "NFO"
-                )
-                if quote and quote.get("ltp") and quote["ltp"] > 0:
-                    t.current_ltp = float(quote["ltp"])
+                if not live_ltp and t.symbol and t.expiry and t.strike_price:
+                    base_kw = "BANKNIFTY" if "BANK" in t.symbol.upper() else (
+                        "SENSEX" if "SENSEX" in t.symbol.upper() else (
+                            "FINNIFTY" if "FIN" in t.symbol.upper() else "NIFTY"
+                        )
+                    )
+                    quote = AngelOneService.fetch_option_contract_ltp(
+                        base_keyword=base_kw,
+                        strike=t.strike_price or 0.0,
+                        option_type=t.option_type or "CE",
+                        expiry_str=t.expiry or "",
+                        exchange=t.exchange or "NFO"
+                    )
+                    if quote and quote.get("ltp") and quote["ltp"] > 0:
+                        live_ltp = float(quote["ltp"])
+
+                if live_ltp and live_ltp > 0:
+                    t.current_ltp = round(live_ltp, 2)
                     db.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error updating live trade LTP for {t.contract_name}: {e}")
 
     result = []
     for t in trades:
         # Calculate current unrealized P&L
-        unrealized = round((t.current_ltp - t.entry_price) * t.quantity, 2) if t.status in ["ACTIVE", "TARGET_1_BOOKED"] else 0.0
-        pnl_pct = round(((t.current_ltp - t.entry_price) / max(0.1, t.entry_price)) * 100, 2) if t.entry_price > 0 else 0.0
-
-        is_call = t.option_type == "CE"
-        target_1_hit = (t.current_ltp >= t.target_1) if is_call else (t.current_ltp <= t.target_1)
-        target_2_hit = (t.current_ltp >= t.target_2) if is_call else (t.current_ltp <= t.target_2)
-        sl_hit = (t.current_ltp <= t.stop_loss) if is_call else (t.current_ltp >= t.stop_loss)
+        if t.action == "SELL":
+            unrealized = round((t.entry_price - t.current_ltp) * t.quantity, 2) if t.status in ["ACTIVE", "TARGET_1_BOOKED"] else 0.0
+            pnl_pct = round(((t.entry_price - t.current_ltp) / max(0.1, t.entry_price)) * 100, 2) if t.entry_price > 0 else 0.0
+            target_1_hit = t.current_ltp <= t.target_1
+            target_2_hit = t.current_ltp <= t.target_2
+            sl_hit = t.current_ltp >= t.stop_loss
+        else:
+            # Standard Option Buyer (both CE & PE): profit when premium rises!
+            unrealized = round((t.current_ltp - t.entry_price) * t.quantity, 2) if t.status in ["ACTIVE", "TARGET_1_BOOKED"] else 0.0
+            pnl_pct = round(((t.current_ltp - t.entry_price) / max(0.1, t.entry_price)) * 100, 2) if t.entry_price > 0 else 0.0
+            target_1_hit = t.current_ltp >= t.target_1
+            target_2_hit = t.current_ltp >= t.target_2
+            sl_hit = t.current_ltp <= t.stop_loss
 
         item = {
             "id": t.id,

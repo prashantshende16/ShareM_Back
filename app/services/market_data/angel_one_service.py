@@ -569,6 +569,64 @@ class AngelOneService:
         return None
 
     @classmethod
+    def get_contract_ltp_sync(
+        cls,
+        exchange: Optional[str] = "NFO",
+        tradingsymbol: Optional[str] = None,
+        symboltoken: Optional[str] = None
+    ) -> Optional[float]:
+        """
+        Directly fetches live tick LTP for any derivative contract token from Angel One.
+        """
+        if not (symboltoken and tradingsymbol) or not cls.is_configured():
+            return None
+
+        login_res = cls.login_sync()
+        if not login_res.get("status"):
+            return None
+
+        url = f"{cls.BASE_URL}/rest/secure/angelbroking/order/v1/getLtpData"
+        headers = cls.get_headers(cls._session_token)
+        try:
+            with httpx.Client(timeout=4.0) as client:
+                res = client.post(
+                    url,
+                    json={
+                        "exchange": exchange or "NFO",
+                        "tradingsymbol": tradingsymbol,
+                        "symboltoken": str(symboltoken)
+                    },
+                    headers=headers
+                )
+                if res.status_code == 200 and res.content:
+                    d = res.json().get("data", {})
+                    ltp = float(d.get("ltp", 0.0))
+                    if ltp > 0:
+                        return ltp
+        except Exception as e:
+            logger.warning(f"Error fetching contract LTP for {tradingsymbol}: {e}")
+        return None
+
+    @classmethod
+    def fetch_option_contract_ltp(
+        cls,
+        base_keyword: str,
+        strike: float,
+        option_type: str,
+        expiry_str: str,
+        exchange: str = "NFO"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Convenience wrapper around get_option_quote_sync.
+        """
+        return cls.get_option_quote_sync(
+            underlying=base_keyword,
+            expiry_str=expiry_str,
+            strike=int(strike),
+            option_type=option_type
+        )
+
+    @classmethod
     def get_profile(cls) -> Dict[str, Any]:
         """Fetch client profile from Angel One SmartAPI."""
         login_res = cls.login_sync()
