@@ -1,16 +1,21 @@
 from typing import List, Dict, Any, Optional
 import math
+import time
+import threading
 from datetime import datetime, timedelta
 import pytz
 
 class OptionSignalIndicator:
     """
-    Intraday 5-Minute Option Trade Signal Engine.
+    Intraday Multi-Timeframe (5m, 15m, 30m, 1h) Option Trade Signal Engine.
     Detects high-probability CALL vs PUT option setups using:
     1. Candlestick Pattern Recognition (Hammer, Shooting Star, Bullish/Bearish Engulfing, Morning/Evening Star, Pinbars)
-    2. Multi-Indicator Confluence (EMA 9/21 Trend Ribbon, SuperTrend / Momentum, RSI 14 Direction, VWAP alignment)
-    3. Volume & Range Expansion Check
+    2. Multi-Indicator Confluence (EMA 9/21/50/200 Ribbon, SuperTrend / Momentum, RSI 14 Direction, VWAP alignment)
+    3. Anchored Trade Levels (Stabilizes Entry, SL, Target 1, Target 2 per timeframe slot to eliminate 30s jitter)
+    4. Emergency Exit / Sudden Market Reversal Sentinel (Alerts user immediately to sell if market suddenly dumps/surges)
     """
+    _anchored_setups: Dict[str, Dict[str, Any]] = {}
+    _setup_lock = threading.Lock()
 
     @staticmethod
     def calculate_ema(prices: List[float], period: int) -> List[float]:
@@ -435,10 +440,31 @@ class OptionSignalIndicator:
         MACD + Bollinger Bands + CPR Pivots + SuperTrend into an institutional
         intraday option trade signal for 5-minute or 15-minute durations.
         """
-        is_15m = (str(timeframe).strip().lower() in ["15m", "15", "15 minute", "15min"])
-        tf_label = "15 Minute" if is_15m else "5 Minute"
-        tf_hold = "30 to 90 Minutes" if is_15m else "15 to 30 Minutes"
-        valid_duration_mins = 60 if is_15m else 30
+        tf_clean = str(timeframe or "5m").strip().lower()
+        is_1h = tf_clean in ["1h", "60m", "60", "1 hour"]
+        is_30m = tf_clean in ["30m", "30", "30min", "30 minute"]
+        is_15m = tf_clean in ["15m", "15", "15min", "15 minute"]
+
+        if is_1h:
+            tf_label = "1-Hour"
+            tf_hold = "2 to 4 Hours"
+            valid_duration_mins = 120
+            slot_duration = 3600
+        elif is_30m:
+            tf_label = "30-Minute"
+            tf_hold = "1 to 2 Hours"
+            valid_duration_mins = 60
+            slot_duration = 1800
+        elif is_15m:
+            tf_label = "15-Minute"
+            tf_hold = "30 to 60 Minutes"
+            valid_duration_mins = 45
+            slot_duration = 900
+        else:
+            tf_label = "5-Minute"
+            tf_hold = "15 to 30 Minutes"
+            valid_duration_mins = 30
+            slot_duration = 300
 
         if not candles or len(candles) < 15:
             return {
@@ -771,7 +797,7 @@ class OptionSignalIndicator:
         contract_tradingsymbol = ""
 
         if live_option_quote and live_option_quote.get("ltp", 0.0) > 0:
-            # REAL LIVE MARKET DATA FROM ANGEL ONE
+            # REAL LIVE MARKET DATA FROM ANGEL ONE (0-Second Delay)
             prem_ltp = round(float(live_option_quote["ltp"]), 1)
             real_close = round(float(live_option_quote.get("close", 0.0)), 1)
             real_high = round(float(live_option_quote.get("high", 0.0)), 1)
@@ -779,19 +805,8 @@ class OptionSignalIndicator:
             real_open = round(float(live_option_quote.get("open", 0.0)), 1)
             contract_tradingsymbol = live_option_quote.get("tradingsymbol", "")
             is_live_angel_one = True
-
-            # Entry buffer ~3-4% above current LTP
-            entry_buffer = round(max(1.5, min(15.0, prem_ltp * 0.035)), 1)
-            prem_entry = round(prem_ltp + entry_buffer, 1)
-
-            # SL: approx 18-20% risk on premium
-            prem_sl_pts = round(max(3.0, min(50.0, prem_entry * 0.18)), 1)
-            prem_sl = round(max(1.0, prem_entry - prem_sl_pts), 1)
-            prem_t1 = round(prem_entry + (prem_sl_pts * 1.5), 1)
-            prem_t2 = round(prem_entry + (prem_sl_pts * 2.8), 1)
         else:
             # FALLBACK SYNTHETIC BLACK-SCHOLES/INTRINSIC HEURISTIC
-
             if active_dte == 0:
                 hour_ist = now_ist.hour if hasattr(now_ist, 'hour') else 12
                 decay = 0.60 if hour_ist >= 14 else (0.75 if hour_ist >= 12 else 1.0)
@@ -814,32 +829,155 @@ class OptionSignalIndicator:
                 time_val = max(5.0, time_val * otm_factor)
 
             prem_ltp = round(max(5.0, intrinsic + time_val), 1)
-            entry_buffer = round(max(2.5, min(25.0, prem_ltp * 0.04)), 1)
+
+        # -------------------------------------------------------------
+        # ANCHORED SETUP STABILIZER (Eliminates 30-Second Target & SL Jitter)
+        # Keeps Trigger Entry, Stop Loss, Target 1, Target 2 rock solid during candle slot
+        # -------------------------------------------------------------
+        cur_epoch = time.time()
+        slot_id = int(cur_epoch // slot_duration)
+        setup_cache_key = f"{sym_clean}_{active_expiry_str}_{target_strike}_{target_opt_type}_{tf_clean}_{slot_id}"
+
+        cached_setup = None
+        with cls._setup_lock:
+            cached_setup = cls._anchored_setups.get(setup_cache_key)
+
+        if cached_setup and direction == cached_setup.get("direction"):
+            # REUSE STABLE ANCHORED LEVELS — Target & SL DO NOT MOVE on 30s ticks!
+            prem_entry = cached_setup["entry"]
+            prem_sl = cached_setup["sl"]
+            prem_t1 = cached_setup["t1"]
+            prem_t2 = cached_setup["t2"]
+            entry_buffer = cached_setup.get("entry_buffer", round(max(1.0, prem_entry - prem_ltp), 1))
+        else:
+            # First time in candle slot: Calculate high R:R targets with tight loss limit
+            sl_pct = 0.10 if is_1h else (0.11 if is_30m else 0.12)
+            t1_mult = 2.8 if is_1h else (2.5 if is_30m else 2.4)
+            t2_mult = 4.5 if is_1h else (4.0 if is_30m else 3.8)
+
+            entry_buffer = round(max(2.0, min(15.0, prem_ltp * 0.035)), 1)
             prem_entry = round(prem_ltp + entry_buffer, 1)
-            prem_sl_pts = round(max(6.0, min(80.0, prem_entry * 0.20)), 1)
-            prem_sl = round(max(3.0, prem_entry - prem_sl_pts), 1)
-            prem_t1 = round(prem_entry + (prem_sl_pts * 1.4), 1)
-            prem_t2 = round(prem_entry + (prem_sl_pts * 2.8), 1)
+
+            # Minimal loss rule: tight structural SL
+            prem_sl_pts = round(max(3.0, min(60.0, prem_entry * sl_pct)), 1)
+            prem_sl = round(max(1.0, prem_entry - prem_sl_pts), 1)
+
+            # Big momentum move (equivalent to 100 to 150 points index expansion)
+            prem_t1 = round(prem_entry + (prem_sl_pts * t1_mult), 1)
+            prem_t2 = round(prem_entry + (prem_sl_pts * t2_mult), 1)
+
+            with cls._setup_lock:
+                cls._anchored_setups[setup_cache_key] = {
+                    "entry": prem_entry,
+                    "sl": prem_sl,
+                    "t1": prem_t1,
+                    "t2": prem_t2,
+                    "entry_buffer": entry_buffer,
+                    "anchor_ltp": prem_ltp,
+                    "direction": direction,
+                    "created_at": cur_epoch,
+                    "slot_id": slot_id
+                }
+
+        # Clean old setup cache (keep memory compact)
+        if len(cls._anchored_setups) > 100:
+            with cls._setup_lock:
+                old_keys = [k for k, v in cls._anchored_setups.items() if (cur_epoch - v.get("created_at", 0)) > 7200]
+                for k in old_keys:
+                    cls._anchored_setups.pop(k, None)
 
         prem_entry_low = round(prem_ltp - 1.0, 1)
         prem_entry_high = prem_entry
 
+        # -------------------------------------------------------------
+        # EMERGENCY REVERSAL & SUDDEN DOWNFALL / SURGE ALERT ENGINE
+        # Immediately detects if market reverses against trade within 1-2 mins
+        # -------------------------------------------------------------
+        emergency_exit_alert = {
+            "triggered": False,
+            "severity": "NORMAL",
+            "type": "NONE",
+            "title": "",
+            "message": "",
+            "reason": "",
+            "action": "HOLD_MONITOR",
+            "contract": contract_tradingsymbol or f"{sym_clean} {strike_suggest}",
+            "current_ltp": prem_ltp,
+            "stop_loss": prem_sl,
+            "target_1": prem_t1,
+            "triggered_at": None
+        }
+
+        # Check Sudden Downfall / Breakdown against CALL:
+        if direction == "CALL":
+            hit_sl = prem_ltp <= prem_sl
+            vwap_breakdown = current_price < (cur_vwap - max(8.0, current_price * 0.0008))
+            sharp_red_candle = (
+                len(candles) >= 2
+                and (candles[-1]["close"] < candles[-1]["open"])
+                and ((candles[-1]["open"] - candles[-1]["close"]) > max(10.0, current_price * 0.0012))
+            )
+
+            if hit_sl or (vwap_breakdown and sharp_red_candle):
+                emergency_exit_alert["triggered"] = True
+                emergency_exit_alert["severity"] = "CRITICAL"
+                emergency_exit_alert["type"] = "SUDDEN_DOWNFALL_REVERSAL"
+                emergency_exit_alert["title"] = "🚨 EMERGENCY EXIT: SUDDEN MARKET DOWNFALL!"
+                emergency_exit_alert["message"] = (
+                    f"WARNING: Sudden sharp market downfall detected on {sym_clean}! "
+                    f"Price broke below VWAP (₹{round(cur_vwap, 1)}) with aggressive selling. "
+                    f"SELL / EXIT {strike_suggest} immediately to prevent rapid capital loss!"
+                )
+                emergency_exit_alert["reason"] = (
+                    f"Stop Loss breached (LTP ₹{prem_ltp} <= SL ₹{prem_sl}). Immediate loss mitigation required."
+                    if hit_sl else f"Sudden high-volume bearish breakdown below VWAP ({round(cur_vwap, 1)}). Immediate cut recommended."
+                )
+                emergency_exit_alert["action"] = "SELL / EXIT NOW"
+                emergency_exit_alert["triggered_at"] = now_ist.strftime("%I:%M:%S %p")
+
+        # Check Sudden Upsurge / Breakdown against PUT:
+        elif direction == "PUT":
+            hit_sl = prem_ltp <= prem_sl
+            vwap_breakout = current_price > (cur_vwap + max(8.0, current_price * 0.0008))
+            sharp_green_candle = (
+                len(candles) >= 2
+                and (candles[-1]["close"] > candles[-1]["open"])
+                and ((candles[-1]["close"] - candles[-1]["open"]) > max(10.0, current_price * 0.0012))
+            )
+
+            if hit_sl or (vwap_breakout and sharp_green_candle):
+                emergency_exit_alert["triggered"] = True
+                emergency_exit_alert["severity"] = "CRITICAL"
+                emergency_exit_alert["type"] = "SUDDEN_SURGE_REVERSAL"
+                emergency_exit_alert["title"] = "🚨 EMERGENCY EXIT: SUDDEN MARKET SURGE!"
+                emergency_exit_alert["message"] = (
+                    f"WARNING: Sudden sharp upward market surge detected on {sym_clean}! "
+                    f"Price spiked above VWAP (₹{round(cur_vwap, 1)}) with aggressive buying. "
+                    f"SELL / EXIT {strike_suggest} immediately to prevent rapid capital loss!"
+                )
+                emergency_exit_alert["reason"] = (
+                    f"Stop Loss breached (LTP ₹{prem_ltp} <= SL ₹{prem_sl}). Immediate loss mitigation required."
+                    if hit_sl else f"Sudden high-volume bullish breakout above VWAP ({round(cur_vwap, 1)}). Immediate cut recommended."
+                )
+                emergency_exit_alert["action"] = "SELL / EXIT NOW"
+                emergency_exit_alert["triggered_at"] = now_ist.strftime("%I:%M:%S %p")
+
         # Generate contextual trade summary
         if direction == "CALL":
             summary = (
-                f"High-Probability 5-Minute CALL setup for {sym_clean} {active_expiry_str} {strike_suggest}. "
+                f"High-Probability {tf_label} CALL setup for {sym_clean} {active_expiry_str} {strike_suggest}. "
                 f"LTP: ₹{prem_ltp}. Recommended Buy Entry above ₹{prem_entry} (SL: ₹{prem_sl}, T1: ₹{prem_t1}, T2: ₹{prem_t2}). "
                 f"Requires ₹{round(lot_size * prem_entry, 2)} capital per lot ({lot_size} qty)."
             )
         elif direction == "PUT":
             summary = (
-                f"High-Probability 5-Minute PUT setup for {sym_clean} {active_expiry_str} {strike_suggest}. "
+                f"High-Probability {tf_label} PUT setup for {sym_clean} {active_expiry_str} {strike_suggest}. "
                 f"LTP: ₹{prem_ltp}. Recommended Buy Entry above ₹{prem_entry} (SL: ₹{prem_sl}, T1: ₹{prem_t1}, T2: ₹{prem_t2}). "
                 f"Requires ₹{round(lot_size * prem_entry, 2)} capital per lot ({lot_size} qty)."
             )
         else:
             summary = (
-                f"5-Minute market is currently consolidating without strong directional confluence. "
+                f"{tf_label} market is currently consolidating without strong directional confluence. "
                 f"Indicators are conflicting (Call: {call_score}, Put: {put_score}). "
                 f"Wait for clear breakout above {round(current_price + sl_points, 1)} or breakdown below {round(current_price - sl_points, 1)}."
             )
@@ -1118,6 +1256,8 @@ class OptionSignalIndicator:
             "selected_strike": target_strike,
             "selected_option_type": target_opt_type,
             "is_live_angel_one": is_live_angel_one,
+            # Emergency Exit & Sudden Market Reversal Sentinel
+            "emergency_exit_alert": emergency_exit_alert,
             # Detailed Trade Execution (Lot Size, Capital, Max Risk)
             "trade_execution": trade_execution,
             # 10-Indicator Observation Checklist

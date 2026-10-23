@@ -112,7 +112,16 @@ def get_option_indicator_signal(
     from app.services.technical_analysis.option_indicator import OptionSignalIndicator
 
     yf_sym = LiveMarketService.resolve_symbol(symbol)
-    interval = "15m" if timeframe.lower() in ["15m", "15", "15min"] else "5m"
+    tf_clean = str(timeframe or "5m").strip().lower()
+    if tf_clean in ["1h", "60m", "60", "1 hour"]:
+        interval = "1h"
+    elif tf_clean in ["30m", "30", "30min", "30 minute"]:
+        interval = "30m"
+    elif tf_clean in ["15m", "15", "15min", "15 minute"]:
+        interval = "15m"
+    else:
+        interval = "5m"
+
     data = LiveMarketService.get_candle_data(yf_sym, interval=interval, range_="5d")
     if not data or not data.get("candles"):
         data = LiveMarketService.get_candle_data(yf_sym, interval=interval, range_="1d")
@@ -157,8 +166,23 @@ def get_all_option_indicator_signals(
 
     symbols = ["NIFTY 50", "BANK NIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"]
     results = {}
-    interval = "15m" if timeframe.lower() in ["15m", "15", "15min"] else "5m"
-    valid_mins = 60 if interval == "15m" else 30
+    tf_clean = str(timeframe or "5m").strip().lower()
+    if tf_clean in ["1h", "60m", "60", "1 hour"]:
+        interval = "1h"
+        valid_mins = 120
+        tf_display = "1 Hour"
+    elif tf_clean in ["30m", "30", "30min", "30 minute"]:
+        interval = "30m"
+        valid_mins = 60
+        tf_display = "30 Minute"
+    elif tf_clean in ["15m", "15", "15min", "15 minute"]:
+        interval = "15m"
+        valid_mins = 45
+        tf_display = "15 Minute"
+    else:
+        interval = "5m"
+        valid_mins = 30
+        tf_display = "5 Minute"
 
     def process_sym(sym):
         try:
@@ -191,7 +215,7 @@ def get_all_option_indicator_signals(
         "timestamp": now_ist.strftime("%I:%M:%S %p"),
         "timestamp_iso": now_ist.isoformat(),
         "valid_until": (now_ist + timedelta(minutes=valid_mins)).strftime("%I:%M:%S %p"),
-        "timeframe": "15 Minute" if interval == "15m" else "5 Minute",
+        "timeframe": tf_display,
         "total_markets": len(results),
         "signals": results
     }
