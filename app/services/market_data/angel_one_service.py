@@ -88,7 +88,9 @@ class AngelOneService:
     _client_code: Optional[str] = None
     _scrip_cache: Dict[str, Any] = {}
     _scrip_cache_time: Dict[str, float] = {}
+    _candle_cache: Dict[str, Any] = {}
     _login_lock = threading.Lock()
+    _candle_lock = threading.Lock()
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -242,79 +244,115 @@ class AngelOneService:
         days_back: int = 5
     ) -> Optional[Dict[str, Any]]:
         """
-        Synchronously fetches historical OHLC candle data from Angel One SmartAPI.
-        Translates to the standard technical analysis format.
+        Synchronously fetches historical OHLC candle data from Angel One SmartAPI
+        with 30-second memory cache and real-time live LTP tick injection.
         """
         token_info = cls.resolve_token(symbol)
         if not token_info:
             return None
 
-        login_res = cls.login_sync()
-        if not login_res.get("status"):
-            return None
+        cache_key = f"{token_info['exchange']}_{token_info['symboltoken']}_{interval}"
+        now_ts = time.time()
 
-        angel_interval = INTERVAL_MAP.get(interval, "FIVE_MINUTE")
-        now = datetime.datetime.now()
-        from_date = now - datetime.timedelta(days=days_back)
-        
-        from_date_str = from_date.strftime("%Y-%m-%d 09:15")
-        to_date_str = now.strftime("%Y-%m-%d %H:%M")
+        # Check in-memory candle cache (valid for 30s)
+        cached = cls._candle_cache.get(cache_key)
+        result_candles = None
+        if cached and (now_ts - cached.get("time", 0)) < 30:
+            result_candles = dict(cached["data"])
 
-        url = f"{cls.BASE_URL}/rest/secure/angelbroking/historical/v1/getCandleData"
-        payload = {
-            "exchange": token_info["exchange"],
-            "symboltoken": token_info["symboltoken"],
-            "interval": angel_interval,
-            "fromdate": from_date_str,
-            "todate": to_date_str
-        }
+        if not result_candles:
+            login_res = cls.login_sync()
+            if not login_res.get("status"):
+                return None
 
-        try:
-            with httpx.Client(timeout=8.0) as client:
-                res = client.post(url, json=payload, headers=cls.get_headers(cls._session_token))
-                data = res.json()
-                if data.get("status") is True and data.get("data"):
-                    raw_candles = data["data"]
-                    valid_candles = []
-                    for c in raw_candles:
-                        dt_str = c[0]
-                        try:
-                            dt = datetime.datetime.fromisoformat(dt_str)
-                            ts = int(dt.timestamp())
-                        except Exception:
-                            ts = int(time.time())
+            angel_interval = INTERVAL_MAP.get(interval, "FIVE_MINUTE")
+            now = datetime.datetime.now()
+            from_date = now - datetime.timedelta(days=days_back)
+            from_date_str = from_date.strftime("%Y-%m-%d 09:15")
+            to_date_str = now.strftime("%Y-%m-%d %H:%M")
 
-                        valid_candles.append({
-                            "time": ts,
-                            "open": round(float(c[1]), 2),
-                            "high": round(float(c[2]), 2),
-                            "low": round(float(c[3]), 2),
-                            "close": round(float(c[4]), 2),
-                            "volume": int(c[5]) if len(c) > 5 else 0
-                        })
+            url = f"{cls.BASE_URL}/rest/secure/angelbroking/historical/v1/getCandleData"
+            payload = {
+                "exchange": token_info["exchange"],
+                "symboltoken": token_info["symboltoken"],
+                "interval": angel_interval,
+                "fromdate": from_date_str,
+                "todate": to_date_str
+            }
 
-                    if not valid_candles:
-                        return None
+            try:
+                with cls._candle_lock:
+                    with httpx.Client(timeout=8.0) as client:
+                        res = client.post(url, json=payload, headers=cls.get_headers(cls._session_token))
+                        # If rate limited (403/429), back off 0.35s and retry once
+                        if res.status_code in (403, 429):
+                            time.sleep(0.35)
+                            res = client.post(url, json=payload, headers=cls.get_headers(cls._session_token))
 
-                    cmp = valid_candles[-1]["close"]
-                    prev_close = valid_candles[-2]["close"] if len(valid_candles) > 1 else cmp
-                    change = round(cmp - prev_close, 2)
-                    change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+                        if res.status_code == 200 and res.content:
+                            data = res.json()
+                            if data.get("status") is True and data.get("data"):
+                                raw_candles = data["data"]
+                                valid_candles = []
+                                for c in raw_candles:
+                                    dt_str = c[0]
+                                    try:
+                                        dt = datetime.datetime.fromisoformat(dt_str)
+                                        ts = int(dt.timestamp())
+                                    except Exception:
+                                        ts = int(time.time())
 
-                    return {
-                        "symbol": symbol,
-                        "source": "ANGEL_ONE",
-                        "current_price": round(cmp, 2),
-                        "previous_close": round(prev_close, 2),
-                        "change": change,
-                        "change_pct": change_pct,
-                        "day_high": max(c["high"] for c in valid_candles[-75:]),
-                        "day_low": min(c["low"] for c in valid_candles[-75:]),
-                        "interval": interval,
-                        "candles": valid_candles[-60:]
-                    }
-        except Exception as e:
-            logger.warning(f"Error fetching Angel One candle data for {symbol}: {e}")
+                                    valid_candles.append({
+                                        "time": ts,
+                                        "open": round(float(c[1]), 2),
+                                        "high": round(float(c[2]), 2),
+                                        "low": round(float(c[3]), 2),
+                                        "close": round(float(c[4]), 2),
+                                        "volume": int(c[5]) if len(c) > 5 else 0
+                                    })
+
+                                if valid_candles:
+                                    cmp = valid_candles[-1]["close"]
+                                    prev_close = valid_candles[-2]["close"] if len(valid_candles) > 1 else cmp
+                                    change = round(cmp - prev_close, 2)
+                                    change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+                                    result_candles = {
+                                        "symbol": symbol,
+                                        "source": "ANGEL_ONE",
+                                        "current_price": round(cmp, 2),
+                                        "previous_close": round(prev_close, 2),
+                                        "change": change,
+                                        "change_pct": change_pct,
+                                        "day_high": max(c["high"] for c in valid_candles[-75:]),
+                                        "day_low": min(c["low"] for c in valid_candles[-75:]),
+                                        "interval": interval,
+                                        "candles": valid_candles[-60:]
+                                    }
+                                    cls._candle_cache[cache_key] = {"time": now_ts, "data": result_candles}
+            except Exception as e:
+                logger.warning(f"Error fetching Angel One candle data for {symbol}: {e}")
+
+        # Inject real-time live LTP directly into the result so prices are NEVER delayed
+        if result_candles:
+            try:
+                ltp_data = cls.get_ltp_sync(symbol)
+                if ltp_data and ltp_data.get("ltp") and ltp_data["ltp"] > 0:
+                    live_ltp = round(float(ltp_data["ltp"]), 2)
+                    result_candles["current_price"] = live_ltp
+                    prev_c = result_candles.get("previous_close", live_ltp)
+                    result_candles["change"] = round(live_ltp - prev_c, 2)
+                    result_candles["change_pct"] = round(((live_ltp - prev_c) / prev_c) * 100, 2) if prev_c else 0.0
+                    if result_candles.get("candles"):
+                        last_c = result_candles["candles"][-1]
+                        last_c["close"] = live_ltp
+                        last_c["high"] = max(last_c["high"], live_ltp)
+                        last_c["low"] = min(last_c["low"], live_ltp)
+            except Exception as e:
+                logger.warning(f"Could not inject live LTP for {symbol}: {e}")
+
+            return result_candles
+
         return None
 
     @classmethod
@@ -392,8 +430,20 @@ class AngelOneService:
         underlying_clean = underlying.upper().strip()
         is_sensex = "SENSEX" in underlying_clean
         is_banknifty = "BANK" in underlying_clean
+        is_finnifty = "FIN" in underlying_clean
+        is_midcp = "MID" in underlying_clean
         exchange = "BFO" if is_sensex else "NFO"
-        base_keyword = "SENSEX" if is_sensex else ("BANKNIFTY" if is_banknifty else "NIFTY")
+
+        if is_sensex:
+            base_keyword = "SENSEX"
+        elif is_banknifty:
+            base_keyword = "BANKNIFTY"
+        elif is_finnifty:
+            base_keyword = "FINNIFTY"
+        elif is_midcp:
+            base_keyword = "MIDCPNIFTY"
+        else:
+            base_keyword = "NIFTY"
 
         cache_key = f"{exchange}_{base_keyword}"
         now = time.time()
@@ -460,9 +510,19 @@ class AngelOneService:
             candidates = [x for x in scrips if x.get("tradingsymbol", "").endswith(suffix)]
             for cand in candidates:
                 ts = cand.get("tradingsymbol", "")
-                if (f"{y2}{m1}{d2}" in ts) or (f"{d2}{m3}{y2}" in ts) or (f"{y2}{m3}" in ts):
+                if (f"{y2}{m1}{d2}" in ts) or (f"{d2}{m3}{y2}" in ts) or (f"{y2}{m3}" in ts) or (f"{m3}{y2}" in ts):
                     matched = cand
                     break
+
+            # 3. Fallback: take the candidate matching the strike and option type with closest date
+            if not matched and candidates:
+                for cand in candidates:
+                    ts = cand.get("tradingsymbol", "")
+                    if m3 in ts:
+                        matched = cand
+                        break
+                if not matched:
+                    matched = candidates[0]
 
         if not matched:
             return None
