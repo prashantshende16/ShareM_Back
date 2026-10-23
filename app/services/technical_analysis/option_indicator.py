@@ -427,7 +427,8 @@ class OptionSignalIndicator:
         expiry_type: str = "current",
         selected_strike: Optional[int] = None,
         selected_option_type: Optional[str] = None,
-        timeframe: str = "5m"
+        timeframe: str = "5m",
+        custom_lot_size: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Synthesizes Candlestick Patterns + EMA Ribbon (9/21/50/200) + RSI + VWAP +
@@ -663,22 +664,28 @@ class OptionSignalIndicator:
         else:
             time_mult = 1.85
 
-        # Exchange Lot Sizes
+        # Exchange Lot Sizes (Updated: SENSEX 1 Lot = 20 Qty, BANK NIFTY 1 Lot = 60 Qty)
         LOT_SIZES = {
+            "SENSEX": 20,
+            "^BSESN": 20,
+            "BANK NIFTY": 60,
+            "BANKNIFTY": 60,
+            "^NSEBANK": 60,
             "NIFTY 50": 65,
             "NIFTY": 65,
-            "BANK NIFTY": 15,
-            "BANKNIFTY": 15,
+            "^NSEI": 65,
             "FINNIFTY": 65,
-            "MIDCPNIFTY": 75,
-            "SENSEX": 10
+            "MIDCPNIFTY": 75
         }
         sym_clean = (symbol or "NIFTY 50").strip().upper()
-        lot_size = 65
-        for k, v in LOT_SIZES.items():
-            if k in sym_clean or sym_clean in k:
-                lot_size = v
-                break
+        if custom_lot_size and custom_lot_size > 0:
+            lot_size = custom_lot_size
+        else:
+            lot_size = 65
+            for k, v in LOT_SIZES.items():
+                if k in sym_clean or sym_clean in k:
+                    lot_size = v
+                    break
 
         # Calculate SuperTrend & Volatility
         supertrend = cls.calculate_supertrend(candles)

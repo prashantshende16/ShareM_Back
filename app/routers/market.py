@@ -92,7 +92,8 @@ def get_option_indicator_signal(
     expiry_type: str = Query(default="current", description="Expiry preference: 'current' or 'next'"),
     strike: Optional[int] = Query(default=None, description="Specific strike to evaluate"),
     option_type: Optional[str] = Query(default=None, description="Option type: 'CE' or 'PE'"),
-    timeframe: str = Query(default="5m", description="Candle timeframe: '5m' or '15m'")
+    timeframe: str = Query(default="5m", description="Candle timeframe: '5m' or '15m'"),
+    lot_size: Optional[int] = Query(default=None, description="Custom lot size override (e.g. 20 for Sensex, 60 for Bank Nifty)")
 ):
     """
     Dedicated 5-Minute and 15-Minute Option Indicator Decision Endpoint.
@@ -125,7 +126,8 @@ def get_option_indicator_signal(
         expiry_type=expiry_type,
         selected_strike=strike,
         selected_option_type=option_type,
-        timeframe=timeframe
+        timeframe=timeframe,
+        custom_lot_size=lot_size
     )
 
     return {
