@@ -220,8 +220,8 @@ def list_trades(
             "trade_mode": t.trade_mode,
             "angel_order_id": t.angel_order_id,
             "notes": t.notes,
-            "entry_time": t.entry_time.isoformat() if t.entry_time else None,
-            "exit_time": t.exit_time.isoformat() if t.exit_time else None,
+            "entry_time": t.entry_time.isoformat() if t.entry_time else (t.created_at.isoformat() if t.created_at else None),
+            "exit_time": t.exit_time.isoformat() if t.exit_time else (t.updated_at.isoformat() if (t.status in ["CLOSED", "STOPPED_OUT", "TARGET_2_BOOKED"] and t.updated_at) else None),
             "created_at": t.created_at.isoformat() if t.created_at else None
         }
         result.append(item)
