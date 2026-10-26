@@ -561,6 +561,33 @@ def book_target_2(trade_id: int, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/close-all")
+def close_all_trades(db: Session = Depends(get_db)):
+    """Square off / exit all active positions at their current LTP."""
+    active_trades = db.query(TradePosition).filter(TradePosition.status.in_(["ACTIVE", "TARGET_1_BOOKED"])).all()
+    count = 0
+    total_realized = 0.0
+    now = datetime.utcnow()
+    for trade in active_trades:
+        if trade.action == "SELL":
+            pnl = round((trade.entry_price - trade.current_ltp) * trade.quantity, 2)
+        else:
+            pnl = round((trade.current_ltp - trade.entry_price) * trade.quantity, 2)
+        trade.realized_pnl = pnl
+        trade.status = "CLOSED"
+        trade.exit_time = now
+        total_realized += pnl
+        count += 1
+
+    db.commit()
+    return {
+        "status": "success",
+        "message": f"Successfully closed {count} active positions. Total P&L locked: ₹{total_realized:,.2f}",
+        "closed_count": count,
+        "total_realized_pnl": round(total_realized, 2)
+    }
+
+
 @router.post("/{trade_id}/close")
 def close_trade(trade_id: int, db: Session = Depends(get_db)):
     """Square off / exit position at current LTP."""
