@@ -409,6 +409,94 @@ class AngelOneService:
         }
 
     @classmethod
+    def get_real_expiries_sync(cls, underlying: str) -> List[Dict[str, Any]]:
+        """
+        Fetches the official exchange derivative expiry dates directly from Angel One
+        SmartAPI searchScrip master, ensuring 100% alignment with the broker's option chain.
+        """
+        if not cls.is_configured():
+            return []
+
+        login_res = cls.login_sync()
+        if not login_res.get("status"):
+            return []
+
+        underlying_clean = underlying.upper().strip()
+        is_sensex = "SENSEX" in underlying_clean
+        is_banknifty = "BANK" in underlying_clean
+        is_finnifty = "FIN" in underlying_clean
+        is_midcp = "MID" in underlying_clean
+        exchange = "BFO" if is_sensex else "NFO"
+
+        if is_sensex:
+            base_keyword = "SENSEX"
+        elif is_banknifty:
+            base_keyword = "BANKNIFTY"
+        elif is_finnifty:
+            base_keyword = "FINNIFTY"
+        elif is_midcp:
+            base_keyword = "MIDCPNIFTY"
+        else:
+            base_keyword = "NIFTY"
+
+        cache_key = f"{exchange}_{base_keyword}"
+        now = time.time()
+
+        if cache_key not in cls._scrip_cache or (now - cls._scrip_cache_time.get(cache_key, 0) > 900):
+            try:
+                url = f"{cls.BASE_URL}/rest/secure/angelbroking/order/v1/searchScrip"
+                headers = cls.get_headers(cls._session_token)
+                with httpx.Client(timeout=8.0) as client:
+                    res = client.post(url, json={"exchange": exchange, "searchscrip": base_keyword}, headers=headers)
+                    if res.status_code == 200:
+                        data = res.json().get("data", [])
+                        if data:
+                            cls._scrip_cache[cache_key] = data
+                            cls._scrip_cache_time[cache_key] = now
+            except Exception as e:
+                logger.warning(f"Error fetching Angel One scrip master for {cache_key}: {e}")
+
+        scrips = cls._scrip_cache.get(cache_key, [])
+        if not scrips:
+            return []
+
+        expiry_set = set()
+        for item in scrips:
+            exp = item.get("expiry")
+            if exp:
+                expiry_set.add(exp.strip())
+
+        today = datetime.date.today()
+        parsed_expiries = []
+
+        for exp_str in expiry_set:
+            dt = None
+            for fmt in ("%d%b%Y", "%d-%b-%Y", "%d %b %Y", "%Y-%m-%d"):
+                try:
+                    dt = datetime.datetime.strptime(exp_str, fmt).date()
+                    break
+                except Exception:
+                    continue
+
+            if dt and dt >= today:
+                dte = (dt - today).days
+                formatted_date = dt.strftime("%d %b %Y")
+                next_wk = dt + datetime.timedelta(days=7)
+                is_monthly = (next_wk.month != dt.month)
+                tag = "0DTE" if dte == 0 else ("Monthly" if is_monthly else "Weekly")
+                parsed_expiries.append({
+                    "id": formatted_date,
+                    "date": formatted_date,
+                    "raw_expiry": exp_str,
+                    "label": f"{dt.strftime('%d %b')} ({'Today / 0DTE' if dte == 0 else tag})",
+                    "tag": tag,
+                    "dte": dte
+                })
+
+        parsed_expiries.sort(key=lambda x: x["dte"])
+        return parsed_expiries
+
+    @classmethod
     def get_option_quote_sync(
         cls,
         underlying: str,

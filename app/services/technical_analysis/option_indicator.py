@@ -330,12 +330,35 @@ class OptionSignalIndicator:
         today = now_ist.date()
         sym = (symbol or "NIFTY 50").strip().upper()
 
+        # 1. Official Real Exchange Expiries directly from Angel One scrip master
+        try:
+            real_expiries = AngelOneService.get_real_expiries_sync(sym)
+            if real_expiries:
+                current_expiry = real_expiries[0]["date"]
+                next_expiry = real_expiries[1]["date"] if len(real_expiries) > 1 else current_expiry
+                is_today = (real_expiries[0]["dte"] == 0)
+                return {
+                    "current_expiry": current_expiry,
+                    "next_expiry": next_expiry,
+                    "is_today_expiry": is_today,
+                    "available_expiries": real_expiries
+                }
+        except Exception as e:
+            logger.warning(f"Could not fetch real expiries from Angel One for {sym}: {e}")
+
         available_expiries = []
         dates_set = set()
 
-        # 1. Today (before 15:30 IST) is active 0DTE expiry
+        # 1. Today is only active 0DTE if today matches the exchange weekly expiry for this symbol
+        is_symbol_expiry_today = (
+            ("SENSEX" in sym and today.weekday() == 4) or
+            ("MID" in sym and today.weekday() == 0) or
+            ("FIN" in sym and today.weekday() == 1) or
+            ("BANK" in sym and today.weekday() == 2) or
+            ("NIFTY" in sym and today.weekday() == 3)
+        )
         is_market_trading = (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute < 30))
-        if is_market_trading:
+        if is_market_trading and is_symbol_expiry_today:
             today_str = today.strftime("%d %b %Y")
             dates_set.add(today_str)
             available_expiries.append({
