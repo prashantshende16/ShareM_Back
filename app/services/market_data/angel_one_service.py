@@ -527,46 +527,106 @@ class AngelOneService:
         if not matched:
             return None
 
-        # Fetch live quote for the matched contract
+        # Fetch live quote for the matched contract using official market quote endpoint
         try:
-            ltp_url = f"{cls.BASE_URL}/rest/secure/angelbroking/order/v1/getLtpData"
+            quote_url = f"{cls.BASE_URL}/rest/secure/angelbroking/market/v1/quote/"
             headers = cls.get_headers(cls._session_token)
             with httpx.Client(timeout=6.0) as client:
                 res = client.post(
-                    ltp_url,
+                    quote_url,
                     json={
-                        "exchange": exchange,
-                        "tradingsymbol": matched["tradingsymbol"],
-                        "symboltoken": matched["symboltoken"]
+                        "mode": "FULL",
+                        "exchangeTokens": {
+                            exchange: [str(matched["symboltoken"])]
+                        }
                     },
                     headers=headers
                 )
                 if res.status_code == 200:
-                    d = res.json().get("data", {})
-                    ltp_val = float(d.get("ltp", 0.0))
-                    close_val = float(d.get("close", 0.0))
-                    open_val = float(d.get("open", 0.0))
-                    high_val = float(d.get("high", 0.0))
-                    low_val = float(d.get("low", 0.0))
-                    effective_ltp = ltp_val if ltp_val > 0 else (close_val if close_val > 0 else high_val)
+                    data = res.json().get("data", {})
+                    fetched = data.get("fetched", [])
+                    if fetched:
+                        item = fetched[0]
+                        ltp_val = float(item.get("ltp", 0.0) or 0.0)
+                        close_val = float(item.get("close", 0.0) or 0.0)
+                        open_val = float(item.get("open", 0.0) or 0.0)
+                        high_val = float(item.get("high", 0.0) or 0.0)
+                        low_val = float(item.get("low", 0.0) or 0.0)
+                        effective_ltp = ltp_val if ltp_val > 0 else (close_val if close_val > 0 else high_val)
 
-                    return {
-                        "tradingsymbol": matched["tradingsymbol"],
-                        "symboltoken": matched["symboltoken"],
-                        "exchange": exchange,
-                        "ltp": round(effective_ltp, 2),
-                        "close": round(close_val, 2),
-                        "open": round(open_val, 2),
-                        "high": round(high_val, 2),
-                        "low": round(low_val, 2),
-                        "strike": strike,
-                        "option_type": opt,
-                        "is_live_angel_one": True
-                    }
+                        return {
+                            "tradingsymbol": matched["tradingsymbol"],
+                            "symboltoken": matched["symboltoken"],
+                            "exchange": exchange,
+                            "ltp": round(effective_ltp, 2),
+                            "close": round(close_val, 2),
+                            "open": round(open_val, 2),
+                            "high": round(high_val, 2),
+                            "low": round(low_val, 2),
+                            "strike": strike,
+                            "option_type": opt,
+                            "is_live_angel_one": True
+                        }
         except Exception as e:
-            logger.warning(f"Error fetching Angel One LTP for {matched.get('tradingsymbol')}: {e}")
+            logger.warning(f"Error fetching Angel One market quote for {matched.get('tradingsymbol')}: {e}")
 
         return None
+
+    @classmethod
+    def get_batch_ltp_sync(
+        cls,
+        tokens_by_exchange: Dict[str, List[str]]
+    ) -> Dict[str, float]:
+        """
+        Fetches live tick LTP in ONE single API call for all tokens across NFO & BFO
+        using Angel One's official Market Quote API:
+        POST /rest/secure/angelbroking/market/v1/quote/
+        """
+        if not cls.is_configured():
+            return {}
+
+        login_res = cls.login_sync()
+        if not login_res.get("status"):
+            return {}
+
+        url = f"{cls.BASE_URL}/rest/secure/angelbroking/market/v1/quote/"
+        headers = cls.get_headers(cls._session_token)
+
+        clean_tokens = {}
+        for ex, toks in tokens_by_exchange.items():
+            valid_toks = [str(t) for t in toks if t]
+            if valid_toks:
+                clean_tokens[ex] = list(set(valid_toks))
+
+        if not clean_tokens:
+            return {}
+
+        ltp_map = {}
+        try:
+            with httpx.Client(timeout=6.0) as client:
+                res = client.post(
+                    url,
+                    json={
+                        "mode": "LTP",
+                        "exchangeTokens": clean_tokens
+                    },
+                    headers=headers
+                )
+                if res.status_code == 200:
+                    data = res.json().get("data", {})
+                    fetched = data.get("fetched", [])
+                    for item in fetched:
+                        tok = str(item.get("symbolToken", ""))
+                        ltp = float(item.get("ltp", 0.0) or 0.0)
+                        if tok and ltp > 0:
+                            ltp_map[tok] = round(ltp, 2)
+                            ts = item.get("tradingSymbol", "")
+                            if ts:
+                                ltp_map[ts] = round(ltp, 2)
+        except Exception as e:
+            logger.warning(f"Error fetching Angel One batch market quote: {e}")
+
+        return ltp_map
 
     @classmethod
     def get_contract_ltp_sync(
@@ -578,34 +638,17 @@ class AngelOneService:
         """
         Directly fetches live tick LTP for any derivative contract token from Angel One.
         """
-        if not (symboltoken and tradingsymbol) or not cls.is_configured():
+        if not symboltoken or not cls.is_configured():
             return None
 
         login_res = cls.login_sync()
         if not login_res.get("status"):
             return None
 
-        url = f"{cls.BASE_URL}/rest/secure/angelbroking/order/v1/getLtpData"
-        headers = cls.get_headers(cls._session_token)
-        try:
-            with httpx.Client(timeout=4.0) as client:
-                res = client.post(
-                    url,
-                    json={
-                        "exchange": exchange or "NFO",
-                        "tradingsymbol": tradingsymbol,
-                        "symboltoken": str(symboltoken)
-                    },
-                    headers=headers
-                )
-                if res.status_code == 200 and res.content:
-                    d = res.json().get("data", {})
-                    ltp = float(d.get("ltp", 0.0))
-                    if ltp > 0:
-                        return ltp
-        except Exception as e:
-            logger.warning(f"Error fetching contract LTP for {tradingsymbol}: {e}")
-        return None
+        ex = exchange or "NFO"
+        tok = str(symboltoken)
+        batch_res = cls.get_batch_ltp_sync({ex: [tok]})
+        return batch_res.get(tok)
 
     @classmethod
     def fetch_option_contract_ltp(

@@ -795,6 +795,7 @@ class OptionSignalIndicator:
         real_close = 0.0
         real_open = 0.0
         contract_tradingsymbol = ""
+        contract_symboltoken = ""
 
         if live_option_quote and live_option_quote.get("ltp", 0.0) > 0:
             # REAL LIVE MARKET DATA FROM ANGEL ONE (0-Second Delay)
@@ -804,6 +805,7 @@ class OptionSignalIndicator:
             real_low = round(float(live_option_quote.get("low", 0.0)), 1)
             real_open = round(float(live_option_quote.get("open", 0.0)), 1)
             contract_tradingsymbol = live_option_quote.get("tradingsymbol", "")
+            contract_symboltoken = str(live_option_quote.get("symboltoken", ""))
             is_live_angel_one = True
         else:
             # FALLBACK SYNTHETIC BLACK-SCHOLES/INTRINSIC HEURISTIC
@@ -1165,7 +1167,8 @@ class OptionSignalIndicator:
             "day_low": real_low,
             "day_close": real_close,
             "day_open": real_open,
-            "tradingsymbol": contract_tradingsymbol
+            "tradingsymbol": contract_tradingsymbol,
+            "symboltoken": contract_symboltoken
         }
 
         generated_at_str = now_ist.strftime("%I:%M:%S %p")
@@ -1255,6 +1258,8 @@ class OptionSignalIndicator:
             "available_strikes": available_strikes,
             "selected_strike": target_strike,
             "selected_option_type": target_opt_type,
+            "contract_tradingsymbol": contract_tradingsymbol,
+            "contract_symboltoken": contract_symboltoken,
             "is_live_angel_one": is_live_angel_one,
             # Emergency Exit & Sudden Market Reversal Sentinel
             "emergency_exit_alert": emergency_exit_alert,

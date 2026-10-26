@@ -136,38 +136,61 @@ def list_trades(
     
     trades = query.order_by(desc(TradePosition.created_at)).all()
 
-    # Dynamically update live tick LTP for active positions
-    for t in trades:
-        if t.status in ["ACTIVE", "TARGET_1_BOOKED"]:
+    # Dynamically update live tick LTP for active positions using batch market quote
+    active_trades = [t for t in trades if t.status in ["ACTIVE", "TARGET_1_BOOKED"]]
+
+    # 1. Resolve missing symboltoken or tradingsymbol for active trades (and cache in DB)
+    for t in active_trades:
+        if not t.symboltoken or not t.tradingsymbol:
             try:
-                live_ltp = None
-                if t.symboltoken and t.tradingsymbol:
-                    live_ltp = AngelOneService.get_contract_ltp_sync(
-                        exchange=t.exchange,
-                        tradingsymbol=t.tradingsymbol,
-                        symboltoken=t.symboltoken
-                    )
-                if not live_ltp and t.symbol and t.expiry and t.strike_price:
-                    base_kw = "BANKNIFTY" if "BANK" in t.symbol.upper() else (
-                        "SENSEX" if "SENSEX" in t.symbol.upper() else (
-                            "FINNIFTY" if "FIN" in t.symbol.upper() else "NIFTY"
+                base_kw = "BANKNIFTY" if "BANK" in (t.symbol or "").upper() else (
+                    "SENSEX" if "SENSEX" in (t.symbol or "").upper() else (
+                        "FINNIFTY" if "FIN" in (t.symbol or "").upper() else (
+                            "MIDCPNIFTY" if "MID" in (t.symbol or "").upper() else "NIFTY"
                         )
                     )
-                    quote = AngelOneService.fetch_option_contract_ltp(
-                        base_keyword=base_kw,
-                        strike=t.strike_price or 0.0,
-                        option_type=t.option_type or "CE",
-                        expiry_str=t.expiry or "",
-                        exchange=t.exchange or "NFO"
-                    )
-                    if quote and quote.get("ltp") and quote["ltp"] > 0:
-                        live_ltp = float(quote["ltp"])
-
-                if live_ltp and live_ltp > 0:
-                    t.current_ltp = round(live_ltp, 2)
+                )
+                quote = AngelOneService.get_option_quote_sync(
+                    underlying=base_kw,
+                    expiry_str=t.expiry or "",
+                    strike=int(t.strike_price or 0.0),
+                    option_type=t.option_type or "CE"
+                )
+                if quote:
+                    t.symboltoken = str(quote.get("symboltoken", "")) or t.symboltoken
+                    t.tradingsymbol = quote.get("tradingsymbol", "") or t.tradingsymbol
+                    if quote.get("ltp") and quote["ltp"] > 0:
+                        t.current_ltp = round(float(quote["ltp"]), 2)
                     db.commit()
             except Exception as e:
-                logger.warning(f"Error updating live trade LTP for {t.contract_name}: {e}")
+                logger.warning(f"Error resolving token for trade {t.id} ({t.contract_name}): {e}")
+
+    # 2. Single batch market quote call for all active derivative tokens
+    tokens_by_exchange: Dict[str, List[str]] = {}
+    for t in active_trades:
+        if t.symboltoken:
+            ex = t.exchange or ("BFO" if "SENSEX" in (t.symbol or "").upper() else "NFO")
+            tokens_by_exchange.setdefault(ex, []).append(str(t.symboltoken))
+
+    if tokens_by_exchange:
+        try:
+            batch_ltp_map = AngelOneService.get_batch_ltp_sync(tokens_by_exchange)
+            has_updates = False
+            for t in active_trades:
+                new_ltp = None
+                if t.symboltoken and str(t.symboltoken) in batch_ltp_map:
+                    new_ltp = batch_ltp_map[str(t.symboltoken)]
+                elif t.tradingsymbol and t.tradingsymbol in batch_ltp_map:
+                    new_ltp = batch_ltp_map[t.tradingsymbol]
+
+                if new_ltp and new_ltp > 0 and new_ltp != t.current_ltp:
+                    t.current_ltp = round(new_ltp, 2)
+                    has_updates = True
+
+            if has_updates:
+                db.commit()
+        except Exception as e:
+            logger.warning(f"Error during batch LTP sync: {e}")
 
     result = []
     for t in trades:
@@ -238,12 +261,35 @@ def create_trade(payload: TradeCreateRequest, db: Session = Depends(get_db)):
     t1_profit = round(abs(payload.target_1 - payload.entry_price) * quantity, 2)
     t2_profit = round(abs(payload.target_2 - payload.entry_price) * quantity, 2)
 
+    tradingsymbol = payload.tradingsymbol
+    symboltoken = payload.symboltoken
+    if not symboltoken or not tradingsymbol:
+        try:
+            base_kw = "BANKNIFTY" if "BANK" in (payload.symbol or "").upper() else (
+                "SENSEX" if "SENSEX" in (payload.symbol or "").upper() else (
+                    "FINNIFTY" if "FIN" in (payload.symbol or "").upper() else (
+                        "MIDCPNIFTY" if "MID" in (payload.symbol or "").upper() else "NIFTY"
+                    )
+                )
+            )
+            quote = AngelOneService.get_option_quote_sync(
+                underlying=base_kw,
+                expiry_str=payload.expiry or "",
+                strike=int(payload.strike_price or 0.0),
+                option_type=payload.option_type or "CE"
+            )
+            if quote:
+                symboltoken = str(quote.get("symboltoken", "")) or symboltoken
+                tradingsymbol = quote.get("tradingsymbol", "") or tradingsymbol
+        except Exception as e:
+            logger.warning(f"Failed to auto-resolve token at creation: {e}")
+
     angel_order_id = None
     if payload.trade_mode.upper() == "LIVE":
         # Place real order via Angel One
         order_res = AngelOneService.place_order(
-            tradingsymbol=payload.tradingsymbol or payload.contract_name,
-            symboltoken=payload.symboltoken or "",
+            tradingsymbol=tradingsymbol or payload.contract_name,
+            symboltoken=symboltoken or "",
             exchange=payload.exchange,
             transactiontype=payload.action,
             quantity=quantity,
@@ -257,8 +303,8 @@ def create_trade(payload: TradeCreateRequest, db: Session = Depends(get_db)):
         symbol=payload.symbol,
         contract_name=payload.contract_name,
         exchange=payload.exchange,
-        tradingsymbol=payload.tradingsymbol,
-        symboltoken=payload.symboltoken,
+        tradingsymbol=tradingsymbol,
+        symboltoken=symboltoken,
         action=payload.action.upper(),
         option_type=payload.option_type.upper(),
         strike_price=payload.strike_price,
