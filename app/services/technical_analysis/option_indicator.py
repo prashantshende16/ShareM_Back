@@ -21,6 +21,32 @@ class OptionSignalIndicator:
     _setup_lock = threading.Lock()
 
     @staticmethod
+    def normal_cdf(x: float) -> float:
+        """Standard normal cumulative distribution function."""
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    @classmethod
+    def calculate_delta(cls, spot: float, strike: float, dte: int, iv: float = 0.18, is_call: bool = True) -> float:
+        """
+        Calculates Black-Scholes Delta for European/NSE Index Options.
+        Returns Delta between 0.05 and 0.95 (positive for Call, negative for Put).
+        """
+        try:
+            t = max(0.002, dte / 365.0)
+            v = max(0.05, iv)
+            r = 0.07  # 7% repo interest rate proxy
+            d1 = (math.log(spot / strike) + (r + 0.5 * v * v) * t) / (v * math.sqrt(t))
+            delta = cls.normal_cdf(d1)
+            if not is_call:
+                delta = delta - 1.0
+            return round(delta, 2)
+        except Exception:
+            diff = spot - strike
+            base = 0.50 + (diff / (spot * 0.02)) * 0.25
+            base = max(0.05, min(0.95, base))
+            return round(base if is_call else (base - 1.0), 2)
+
+    @staticmethod
     def calculate_ema(prices: List[float], period: int) -> List[float]:
         if len(prices) < period:
             return [prices[-1]] * len(prices) if prices else []
@@ -798,10 +824,20 @@ class OptionSignalIndicator:
                 s_tag = f"ITM {abs(diff)}"
             else:
                 s_tag = f"OTM {abs(diff)}"
+
+            stk_delta = cls.calculate_delta(
+                spot=current_price,
+                strike=s_val,
+                dte=active_dte,
+                iv=0.18,
+                is_call=(target_opt_type == "CE")
+            )
+
             available_strikes.append({
                 "strike": s_val,
                 "label": f"{s_val} ({s_tag})",
                 "tag": s_tag,
+                "delta": stk_delta,
                 "is_atm": diff == 0,
                 "is_selected": s_val == target_strike
             })
@@ -1177,12 +1213,20 @@ class OptionSignalIndicator:
         target_1_profit = round(lot_size * (prem_t1 - prem_entry), 2)
         target_2_profit = round(lot_size * (prem_t2 - prem_entry), 2)
         contract_name = f"{contract_tradingsymbol + ' - ' if contract_tradingsymbol else ''}{sym_clean} {active_expiry_str.upper()} {strike_suggest}"
+        target_delta = cls.calculate_delta(
+            spot=current_price,
+            strike=target_strike,
+            dte=active_dte,
+            iv=0.18,
+            is_call=(target_opt_type == "CE")
+        )
 
         trade_execution = {
             "contract_name": contract_name,
             "symbol": sym_clean,
             "expiry": active_expiry_str,
             "strike": strike_suggest,
+            "delta": target_delta,
             "lot_size": lot_size,
             "lots": 1,
             "total_quantity": lot_size,

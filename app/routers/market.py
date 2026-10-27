@@ -42,6 +42,25 @@ def get_global_market_radar():
         "data": radar
     }
 
+@router.get("/surge-radar")
+def get_surge_radar(force: bool = False):
+    """
+    Automated Sudden Movement & Momentum Surge Radar:
+    Detects 10% - 20%+ rapid option price expansions, volume surges,
+    and calculates Delta with live Nasdaq, Dow Jones, and India VIX observations.
+    Generates automated actionable CALL and PUT trade suggestions.
+    """
+    from app.services.technical_analysis.surge_radar_service import SurgeRadarService
+    return SurgeRadarService.scan_surge_radar(force_refresh=force)
+
+@router.post("/surge-radar/reset-notifications")
+def reset_surge_radar_notifications():
+    """
+    Marks all sudden surge alerts as viewed / read.
+    """
+    from app.services.technical_analysis.surge_radar_service import SurgeRadarService
+    return SurgeRadarService.reset_notifications()
+
 @router.post("/ai-strategy-agent")
 async def run_ai_market_strategy_agent(payload: AIStrategyAgentRequest):
     """
