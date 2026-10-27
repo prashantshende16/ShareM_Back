@@ -2,8 +2,11 @@ from typing import List, Dict, Any, Optional
 import math
 import time
 import threading
+import logging
 from datetime import datetime, timedelta
 import pytz
+
+logger = logging.getLogger(__name__)
 
 class OptionSignalIndicator:
     """
@@ -354,8 +357,8 @@ class OptionSignalIndicator:
             ("SENSEX" in sym and today.weekday() == 4) or
             ("MID" in sym and today.weekday() == 0) or
             ("FIN" in sym and today.weekday() == 1) or
-            ("BANK" in sym and today.weekday() == 2) or
-            ("NIFTY" in sym and today.weekday() == 3)
+            ("BANK" in sym and today.weekday() in (1, 2, 3)) or
+            ("NIFTY" in sym and today.weekday() in (1, 3))
         )
         is_market_trading = (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute < 30))
         if is_market_trading and is_symbol_expiry_today:
@@ -418,15 +421,26 @@ class OptionSignalIndicator:
                     "tag": "Midcap",
                     "dte": day_offset
                 })
-            # Tuesday: FinNifty
-            elif d.weekday() == 1 and day_offset <= 14 and ("FIN" in sym or "FINNIFTY" in sym):
+            # Tuesday: Nifty 50, FinNifty, Bank Nifty
+            elif d.weekday() == 1:
                 dates_set.add(d_str)
                 available_expiries.append({
                     "id": d_str,
-                    "type": "finnifty",
+                    "type": "weekly",
                     "date": d_str,
                     "label": f"{d_str} (Tuesday)",
-                    "tag": "FinNifty",
+                    "tag": "Weekly",
+                    "dte": day_offset
+                })
+            # Friday: BSE Sensex
+            elif d.weekday() == 4 and "SENSEX" in sym:
+                dates_set.add(d_str)
+                available_expiries.append({
+                    "id": d_str,
+                    "type": "sensex",
+                    "date": d_str,
+                    "label": f"{d_str} (Friday)",
+                    "tag": "Sensex",
                     "dte": day_offset
                 })
 
