@@ -43,15 +43,15 @@ def get_global_market_radar():
     }
 
 @router.get("/surge-radar")
-def get_surge_radar(force: bool = False):
+def get_surge_radar(date: Optional[str] = Query(default=None), force: bool = False):
     """
     Automated Sudden Movement & Momentum Surge Radar:
     Detects 10% - 20%+ rapid option price expansions, volume surges,
     and calculates Delta with live Nasdaq, Dow Jones, and India VIX observations.
-    Generates automated actionable CALL and PUT trade suggestions.
+    Generates automated actionable CALL and PUT trade suggestions date-wise.
     """
     from app.services.technical_analysis.surge_radar_service import SurgeRadarService
-    return SurgeRadarService.scan_surge_radar(force_refresh=force)
+    return SurgeRadarService.scan_surge_radar(date_filter=date, force_refresh=force)
 
 @router.post("/surge-radar/reset-notifications")
 def reset_surge_radar_notifications():

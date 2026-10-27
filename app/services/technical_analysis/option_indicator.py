@@ -361,6 +361,7 @@ class OptionSignalIndicator:
 
         # 1. Official Real Exchange Expiries directly from Angel One scrip master
         try:
+            from app.services.market_data.angel_one_service import AngelOneService
             real_expiries = AngelOneService.get_real_expiries_sync(sym)
             if real_expiries:
                 current_expiry = real_expiries[0]["date"]
