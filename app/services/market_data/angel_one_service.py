@@ -6,6 +6,7 @@ import base64
 import logging
 import datetime
 import threading
+import re
 from typing import Dict, Any, List, Optional
 import httpx
 
@@ -461,17 +462,23 @@ class AngelOneService:
             return []
 
         expiry_set = set()
+        date_pattern = re.compile(r"([0-9]{2}[A-Z]{3}[0-9]{2})")
         for item in scrips:
             exp = item.get("expiry")
             if exp:
                 expiry_set.add(exp.strip())
+            else:
+                ts = item.get("tradingsymbol", "")
+                m = date_pattern.search(ts)
+                if m:
+                    expiry_set.add(m.group(1))
 
         today = datetime.date.today()
         parsed_expiries = []
 
         for exp_str in expiry_set:
             dt = None
-            for fmt in ("%d%b%Y", "%d-%b-%Y", "%d %b %Y", "%Y-%m-%d"):
+            for fmt in ("%d%b%y", "%d%b%Y", "%d-%b-%Y", "%d %b %Y", "%Y-%m-%d", "%d%B%Y"):
                 try:
                     dt = datetime.datetime.strptime(exp_str, fmt).date()
                     break
@@ -602,14 +609,25 @@ class AngelOneService:
                     matched = cand
                     break
 
-            # 3. Fallback: take the candidate matching the strike and option type with closest date
+            # 3. Fallback: take the candidate matching the strike and option type with closest upcoming date
             if not matched and candidates:
-                for cand in candidates:
-                    ts = cand.get("tradingsymbol", "")
-                    if m3 in ts:
-                        matched = cand
-                        break
-                if not matched:
+                date_pattern = re.compile(r"([0-9]{2}[A-Z]{3}[0-9]{2})")
+                def parse_cand_date(cand):
+                    m = date_pattern.search(cand.get("tradingsymbol", ""))
+                    if m:
+                        try:
+                            return datetime.datetime.strptime(m.group(1), "%d%b%y").date()
+                        except Exception:
+                            pass
+                    return datetime.date(2099, 1, 1)
+
+                target_d = dt.date()
+                upcoming = [c for c in candidates if parse_cand_date(c) >= target_d]
+                if upcoming:
+                    upcoming.sort(key=lambda c: parse_cand_date(c))
+                    matched = upcoming[0]
+                else:
+                    candidates.sort(key=lambda c: abs((parse_cand_date(c) - target_d).days))
                     matched = candidates[0]
 
         if not matched:
