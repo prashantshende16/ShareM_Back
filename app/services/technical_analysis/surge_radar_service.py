@@ -304,33 +304,6 @@ class SurgeRadarService:
                     if not exec_data:
                         continue
 
-                    # 3. Sudden 10% - 20%+ Surge & Volume Spike Detection
-                    last_candle = candles[-1]
-                    prev_candles = candles[-15:]
-                    avg_vol = sum(c.get("volume", 0) for c in prev_candles) / max(1, len(prev_candles))
-                    cur_vol = last_candle.get("volume", 0)
-                    vol_ratio = round(cur_vol / max(1.0, avg_vol), 1)
-
-                    # Recent 3-candle price volatility momentum
-                    index_move_pct = abs(candles[-1]["close"] - candles[-3]["open"]) / max(1.0, candles[-3]["open"]) * 100
-
-                    # Option delta acceleration factor (typically 15x - 30x of spot index move)
-                    estimated_option_surge_pct = round(max(8.5, index_move_pct * 22.0), 1)
-
-                    # Surge tier classification
-                    if estimated_option_surge_pct >= 20.0 or vol_ratio >= 2.5:
-                        surge_tier = "MEGA_SURGE_20PCT"
-                        surge_badge = f"🔥 +{estimated_option_surge_pct}% Sudden Surge"
-                        is_hot = True
-                    elif estimated_option_surge_pct >= 12.0 or vol_ratio >= 1.6:
-                        surge_tier = "FAST_MOMENTUM_15PCT"
-                        surge_badge = f"⚡ +{estimated_option_surge_pct}% Sudden Move"
-                        is_hot = True
-                    else:
-                        surge_tier = "EARLY_BREAKOUT_10PCT"
-                        surge_badge = f"✨ +{estimated_option_surge_pct}% Momentum"
-                        is_hot = False
-
                     # Delta computation
                     target_strike = signal.get("selected_strike") or (int(cmp // idx_info["strike_step"]) * idx_info["strike_step"])
                     is_call = (direction == "CALL") or (direction == "SIDEWAYS" and macro["us_avg_change"] >= 0)
@@ -351,6 +324,59 @@ class SurgeRadarService:
                     sl = exec_data.get("stop_loss", round(entry * 0.85, 1))
                     t1 = exec_data.get("target_1", round(entry * 1.35, 1))
                     t2 = exec_data.get("target_2", round(entry * 1.60, 1))
+
+                    # 3. Dynamic Real Option Surge & Volume Spike Detection
+                    last_candle = candles[-1]
+                    prev_candles = candles[-15:]
+                    cur_vol = last_candle.get("volume", 0)
+                    avg_vol = sum(c.get("volume", 0) for c in prev_candles) / max(1, len(prev_candles))
+                    if cur_vol > 0 and avg_vol > 0:
+                        vol_ratio = round(cur_vol / avg_vol, 1)
+                    else:
+                        # Estimate volatility expansion when volume is not reported on index candles
+                        candle_ranges = [c["high"] - c["low"] for c in prev_candles]
+                        avg_r = sum(candle_ranges) / max(1, len(candle_ranges))
+                        cur_r = last_candle["high"] - last_candle["low"]
+                        vol_ratio = round(max(1.1, min(4.5, (cur_r / max(0.1, avg_r)) * 1.8)), 1)
+
+                    # Priority 1: Real Angel One Live Option price change % from previous close / open
+                    real_close = float(exec_data.get("day_close", 0.0) or 0.0)
+                    real_open = float(exec_data.get("day_open", 0.0) or 0.0)
+                    real_option_change_pct = 0.0
+                    if real_close > 0 and ltp > 0:
+                        real_option_change_pct = round(abs(ltp - real_close) / real_close * 100, 1)
+                    elif real_open > 0 and ltp > 0:
+                        real_option_change_pct = round(abs(ltp - real_open) / real_open * 100, 1)
+
+                    # Priority 2: Multi-candle price volatility momentum scaled by option gearing
+                    c1_pct = abs(last_candle["close"] - last_candle["open"]) / max(1.0, last_candle["open"]) * 100
+                    c3_pct = abs(last_candle["close"] - candles[-3]["open"]) / max(1.0, candles[-3]["open"]) * 100
+                    c5_pct = abs(last_candle["close"] - candles[-5]["open"]) / max(1.0, candles[-5]["open"]) * 100
+                    c_rng = (last_candle["high"] - last_candle["low"]) / max(1.0, last_candle["low"]) * 100
+                    spot_move = max(c1_pct * 1.5, c_rng * 1.2, c3_pct, c5_pct * 0.8, 0.25)
+
+                    # Option gearing (effective leverage = |delta| * spot / ltp)
+                    gearing = min(42.0, max(15.0, (abs(strike_delta) * cmp) / max(15.0, ltp)))
+                    synthetic_option_surge = round(spot_move * gearing, 1)
+
+                    if real_option_change_pct >= 4.0:
+                        estimated_option_surge_pct = real_option_change_pct
+                    else:
+                        estimated_option_surge_pct = max(real_option_change_pct, synthetic_option_surge)
+
+                    # Surge tier classification
+                    if estimated_option_surge_pct >= 20.0 or vol_ratio >= 2.5:
+                        surge_tier = "MEGA_SURGE_20PCT"
+                        surge_badge = f"🔥 +{estimated_option_surge_pct}% Sudden Surge"
+                        is_hot = True
+                    elif estimated_option_surge_pct >= 12.0 or vol_ratio >= 1.6:
+                        surge_tier = "FAST_MOMENTUM_15PCT"
+                        surge_badge = f"⚡ +{estimated_option_surge_pct}% Sudden Move"
+                        is_hot = True
+                    else:
+                        surge_tier = "EARLY_BREAKOUT_10PCT"
+                        surge_badge = f"✨ +{estimated_option_surge_pct}% Momentum"
+                        is_hot = False
 
                     # Unique Suggestion ID per 15-minute window
                     slot_id = int(now // 600)
