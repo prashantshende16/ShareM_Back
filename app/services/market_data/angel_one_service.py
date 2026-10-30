@@ -410,6 +410,45 @@ class AngelOneService:
         }
 
     @classmethod
+    def _parse_tradingsymbol_date(cls, ts: str) -> Optional[datetime.date]:
+        """
+        Extracts expiry date from any NSE or BSE derivative trading symbol:
+        1. BSE Weekly: SENSEX26N0574400PE -> 2026-11-05
+        2. BSE Monthly: SENSEX26NOV74400PE -> 2026-11-26
+        3. NSE Weekly/Monthly: NIFTY03NOV2623100CE -> 2026-11-03
+        """
+        if not ts:
+            return None
+        # 1. BSE Weekly format: SENSEX26N05... (YYMDD)
+        m_bse_w = re.search(r"SENSEX([0-9]{2})([1-9OND])([0-9]{2})", ts)
+        if m_bse_w:
+            bse_month_map = {'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'O':10,'N':11,'D':12}
+            try:
+                yy, m_c, dd = m_bse_w.groups()
+                return datetime.date(2000 + int(yy), bse_month_map[m_c], int(dd))
+            except Exception:
+                pass
+
+        # 2. BSE Monthly format: SENSEX26NOV74400... (YYMMM)
+        m_bse_m = re.search(r"SENSEX([0-9]{2})([A-Z]{3})[0-9]{5}", ts)
+        if m_bse_m:
+            try:
+                yy, m_s = m_bse_m.groups()
+                return datetime.datetime.strptime(f"26{m_s}{yy}", "%d%b%y").date()
+            except Exception:
+                pass
+
+        # 3. NSE Weekly/Monthly format: DDMMMYY (e.g. 03NOV26)
+        m_nse = re.search(r"([0-9]{2}[A-Z]{3}(?:26|27|28|29))", ts)
+        if m_nse:
+            try:
+                return datetime.datetime.strptime(m_nse.group(1), "%d%b%y").date()
+            except Exception:
+                pass
+
+        return None
+
+    @classmethod
     def get_real_expiries_sync(cls, underlying: str) -> List[Dict[str, Any]]:
         """
         Fetches the official exchange derivative expiry dates directly from Angel One
@@ -461,44 +500,39 @@ class AngelOneService:
         if not scrips:
             return []
 
-        expiry_set = set()
-        date_pattern = re.compile(r"([0-9]{2}[A-Z]{3}[0-9]{2})")
+        today = datetime.date.today()
+        dates_found = set()
         for item in scrips:
             exp = item.get("expiry")
+            d = None
             if exp:
-                expiry_set.add(exp.strip())
-            else:
-                ts = item.get("tradingsymbol", "")
-                m = date_pattern.search(ts)
-                if m:
-                    expiry_set.add(m.group(1))
+                for fmt in ("%d%b%y", "%d%b%Y", "%d-%b-%Y", "%d %b %Y", "%Y-%m-%d"):
+                    try:
+                        d = datetime.datetime.strptime(exp.strip(), fmt).date()
+                        break
+                    except Exception:
+                        pass
+            if not d:
+                d = cls._parse_tradingsymbol_date(item.get("tradingsymbol", ""))
 
-        today = datetime.date.today()
+            if d and d >= today and d.year <= today.year + 1:
+                dates_found.add(d)
+
         parsed_expiries = []
-
-        for exp_str in expiry_set:
-            dt = None
-            for fmt in ("%d%b%y", "%d%b%Y", "%d-%b-%Y", "%d %b %Y", "%Y-%m-%d", "%d%B%Y"):
-                try:
-                    dt = datetime.datetime.strptime(exp_str, fmt).date()
-                    break
-                except Exception:
-                    continue
-
-            if dt and dt >= today:
-                dte = (dt - today).days
-                formatted_date = dt.strftime("%d %b %Y")
-                next_wk = dt + datetime.timedelta(days=7)
-                is_monthly = (next_wk.month != dt.month)
-                tag = "0DTE" if dte == 0 else ("Monthly" if is_monthly else "Weekly")
-                parsed_expiries.append({
-                    "id": formatted_date,
-                    "date": formatted_date,
-                    "raw_expiry": exp_str,
-                    "label": f"{dt.strftime('%d %b')} ({'Today / 0DTE' if dte == 0 else tag})",
-                    "tag": tag,
-                    "dte": dte
-                })
+        for dt in sorted(list(dates_found)):
+            dte = (dt - today).days
+            formatted_date = dt.strftime("%d %b %Y")
+            next_wk = dt + datetime.timedelta(days=7)
+            is_monthly = (next_wk.month != dt.month)
+            tag = "0DTE" if dte == 0 else ("Monthly" if is_monthly else "Weekly")
+            parsed_expiries.append({
+                "id": formatted_date,
+                "date": formatted_date,
+                "raw_expiry": formatted_date,
+                "label": f"{dt.strftime('%d %b')} ({'Today / 0DTE' if dte == 0 else tag})",
+                "tag": tag,
+                "dte": dte
+            })
 
         parsed_expiries.sort(key=lambda x: x["dte"])
         return parsed_expiries
@@ -611,15 +645,9 @@ class AngelOneService:
 
             # 3. Fallback: take the candidate matching the strike and option type with closest upcoming date
             if not matched and candidates:
-                date_pattern = re.compile(r"([0-9]{2}[A-Z]{3}[0-9]{2})")
                 def parse_cand_date(cand):
-                    m = date_pattern.search(cand.get("tradingsymbol", ""))
-                    if m:
-                        try:
-                            return datetime.datetime.strptime(m.group(1), "%d%b%y").date()
-                        except Exception:
-                            pass
-                    return datetime.date(2099, 1, 1)
+                    d = cls._parse_tradingsymbol_date(cand.get("tradingsymbol", ""))
+                    return d if d else datetime.date(2099, 1, 1)
 
                 target_d = dt.date()
                 upcoming = [c for c in candidates if parse_cand_date(c) >= target_d]
