@@ -28,6 +28,7 @@ class SurgeRadarService:
     _unread_count: int = 0
     _last_seen_ids: set = set()
     _SCAN_CACHE_TTL = 15.0  # 15 seconds cache to stay real-time
+    MIN_PROFIT_CONFIDENCE = 80  # Strict minimum profit probability / confidence (>= 80% only)
 
     SUPPORTED_INDICES = [
         {"symbol": "NIFTY 50", "yf": "^NSEI", "lot_size": 65, "strike_step": 50},
@@ -40,11 +41,20 @@ class SurgeRadarService:
     @classmethod
     def _load_history(cls):
         if cls._history_records:
+            # Enforce >= 80% filter on any records currently in memory
+            cls._history_records = [
+                r for r in cls._history_records
+                if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
+            ]
             return
         if os.path.exists(HISTORY_FILE):
             try:
                 with open(HISTORY_FILE, "r") as f:
-                    cls._history_records = json.load(f)
+                    raw_records = json.load(f)
+                    cls._history_records = [
+                        r for r in raw_records
+                        if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
+                    ]
                     for r in cls._history_records:
                         cls._last_seen_ids.add(r.get("id"))
                 return
@@ -176,8 +186,13 @@ class SurgeRadarService:
     def _save_history(cls):
         try:
             os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+            valid_records = [
+                r for r in cls._history_records
+                if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
+            ]
+            cls._history_records = valid_records
             with open(HISTORY_FILE, "w") as f:
-                json.dump(cls._history_records[-100:], f, indent=2)
+                json.dump(cls._history_records[:100], f, indent=2)
         except Exception as e:
             logger.warning(f"Could not save surge history: {e}")
 
@@ -304,6 +319,11 @@ class SurgeRadarService:
                     if not exec_data:
                         continue
 
+                    # Strict filter: only signals with confidence / profit chance >= MIN_PROFIT_CONFIDENCE (80%+)
+                    conf_score = int(signal.get("confidence") or 0)
+                    if conf_score < cls.MIN_PROFIT_CONFIDENCE:
+                        continue
+
                     # Delta computation
                     target_strike = signal.get("selected_strike") or (int(cmp // idx_info["strike_step"]) * idx_info["strike_step"])
                     is_call = (direction == "CALL") or (direction == "SIDEWAYS" and macro["us_avg_change"] >= 0)
@@ -408,7 +428,7 @@ class SurgeRadarService:
                         "target_1": t1,
                         "target_2": t2,
                         "risk_reward": exec_data.get("risk_reward_ratio", "1:2.4"),
-                        "confidence_score": signal.get("confidence", 78),
+                        "confidence_score": conf_score,
                         "macro_confluence": macro["macro_verdict"],
                         "dow_change": macro["dow_jones"]["change_pct"],
                         "nasdaq_change": macro["nasdaq"]["change_pct"],
@@ -445,11 +465,15 @@ class SurgeRadarService:
             cls._last_scan_epoch = now
             cls._save_history()
 
-        # Build available dates list from all historical + current records
-        all_pool = list(cls._history_records)
+        # Build available dates list from all historical + current records (strictly >= MIN_PROFIT_CONFIDENCE)
+        all_pool = [
+            r for r in cls._history_records
+            if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
+        ]
         for s in cls._cached_suggestions:
-            if not any(r["id"] == s["id"] for r in all_pool):
-                all_pool.insert(0, s)
+            if (s.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE:
+                if not any(r["id"] == s["id"] for r in all_pool):
+                    all_pool.insert(0, s)
 
         # Dates present
         date_counts: Dict[str, int] = {}
@@ -494,6 +518,7 @@ class SurgeRadarService:
         return {
             "status": "success",
             "macro_radar": macro,
+            "min_confidence": cls.MIN_PROFIT_CONFIDENCE,
             "selected_date": active_filter,
             "today_date": today_str,
             "available_dates": available_dates,

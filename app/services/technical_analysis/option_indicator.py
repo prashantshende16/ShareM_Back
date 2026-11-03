@@ -500,10 +500,56 @@ class OptionSignalIndicator:
         custom_lot_size: Optional[int] = None
     ) -> Dict[str, Any]:
         """
+        Public entry point. Returns a STABLE, LOCKED option signal:
+        - direction decided only on CLOSED candles (forming candle ignored)
+        - requires 2 consecutive closed-candle confirmations + hysteresis
+        - once locked, the CALL/PUT and its Entry/SL/T1/T2 stay fixed until
+          SL / T1 / T2 is hit, the setup weakens, or 30 minutes pass
+        - every resolved signal is journaled for real win-rate tracking
+        """
+        from app.services.technical_analysis.signal_lock_service import SignalLockService
+        return SignalLockService.evaluate(
+            cls,
+            candles=candles,
+            cmp=cmp,
+            symbol=symbol,
+            expiry_type=expiry_type,
+            selected_strike=selected_strike,
+            selected_option_type=selected_option_type,
+            timeframe=timeframe,
+            custom_lot_size=custom_lot_size,
+        )
+
+    @classmethod
+    def _evaluate_raw_signal(
+        cls,
+        candles: List[Dict[str, Any]],
+        cmp: Optional[float] = None,
+        symbol: Optional[str] = None,
+        expiry_type: str = "current",
+        selected_strike: Optional[int] = None,
+        selected_option_type: Optional[str] = None,
+        timeframe: str = "5m",
+        custom_lot_size: Optional[int] = None,
+        score_candles: Optional[List[Dict[str, Any]]] = None,
+        score_price: Optional[float] = None,
+        forced_direction: Optional[str] = None,
+        score_only: bool = False
+    ) -> Dict[str, Any]:
+        """
         Synthesizes Candlestick Patterns + EMA Ribbon (9/21/50/200) + RSI + VWAP +
         MACD + Bollinger Bands + CPR Pivots + SuperTrend into an institutional
         intraday option trade signal for 5-minute or 15-minute durations.
+
+        score_candles / score_price: when given, indicators & CALL/PUT scoring use
+            these (closed candles) instead of the live forming candle / live price.
+        forced_direction: "CALL" | "PUT" | "SIDEWAYS" overrides the score-based decision
+            (used by SignalLockService to keep a locked direction stable).
+        score_only: return only the raw scores (cheap, no broker/network calls).
         """
+        full_candles = candles
+        if score_candles:
+            candles = score_candles
         tf_clean = str(timeframe or "5m").strip().lower()
         is_1h = tf_clean in ["1h", "60m", "60", "1 hour"]
         is_30m = tf_clean in ["30m", "30", "30min", "30 minute"]
@@ -551,7 +597,9 @@ class OptionSignalIndicator:
             }
 
         closes = [c["close"] for c in candles]
-        current_price = cmp or closes[-1]
+        live_price = cmp or (full_candles[-1]["close"] if full_candles else closes[-1])
+        # Score on the closed-candle price when provided (prevents live-tick flip-flop)
+        current_price = score_price or live_price
 
         # Calculate Technical Indicator Suite
         ema9 = cls.calculate_ema(closes, 9)
@@ -675,6 +723,18 @@ class OptionSignalIndicator:
         call_pct = int(round((call_score / max(1, total_points)) * 100))
         put_pct = 100 - call_pct
 
+        if score_only:
+            return {
+                "call_points": call_score,
+                "put_points": put_score,
+                "call_pct": call_pct,
+                "put_pct": put_pct,
+                "candle_time": candles[-1].get("time") if candles else None,
+            }
+
+        # From here on, strikes / premiums / levels use the LIVE price
+        current_price = live_price
+
         # Dynamic strike suggestion (ATM step based on index price level)
         strike_step = 50 if current_price < 30000 else 100
         atm_strike = int(round(current_price / strike_step) * strike_step)
@@ -781,7 +841,14 @@ class OptionSignalIndicator:
         supertrend = cls.calculate_supertrend(candles)
 
         # 1. Determine Decision & Direction
-        if call_score >= put_score + 20 and call_pct >= 60:
+        if forced_direction is not None:
+            want_call = forced_direction == "CALL"
+            want_put = forced_direction == "PUT"
+        else:
+            want_call = call_score >= put_score + 20 and call_pct >= 60
+            want_put = (not want_call) and put_score >= call_score + 20 and put_pct >= 60
+
+        if want_call:
             decision = "BUY CALL (CE)"
             direction = "CALL"
             confidence = min(92, max(64, call_pct))
@@ -790,7 +857,7 @@ class OptionSignalIndicator:
             stop_loss = round(current_price - sl_points, 1)
             target_1 = round(current_price + t1_points, 1)
             target_2 = round(current_price + t2_points, 1)
-        elif put_score >= call_score + 20 and put_pct >= 60:
+        elif want_put:
             decision = "BUY PUT (PE)"
             direction = "PUT"
             confidence = min(92, max(64, put_pct))
@@ -989,9 +1056,9 @@ class OptionSignalIndicator:
             hit_sl = prem_ltp <= prem_sl
             vwap_breakdown = current_price < (cur_vwap - max(8.0, current_price * 0.0008))
             sharp_red_candle = (
-                len(candles) >= 2
-                and (candles[-1]["close"] < candles[-1]["open"])
-                and ((candles[-1]["open"] - candles[-1]["close"]) > max(10.0, current_price * 0.0012))
+                len(full_candles) >= 2
+                and (full_candles[-1]["close"] < full_candles[-1]["open"])
+                and ((full_candles[-1]["open"] - full_candles[-1]["close"]) > max(10.0, current_price * 0.0012))
             )
 
             if hit_sl or (vwap_breakdown and sharp_red_candle):
@@ -1016,9 +1083,9 @@ class OptionSignalIndicator:
             hit_sl = prem_ltp <= prem_sl
             vwap_breakout = current_price > (cur_vwap + max(8.0, current_price * 0.0008))
             sharp_green_candle = (
-                len(candles) >= 2
-                and (candles[-1]["close"] > candles[-1]["open"])
-                and ((candles[-1]["close"] - candles[-1]["open"]) > max(10.0, current_price * 0.0012))
+                len(full_candles) >= 2
+                and (full_candles[-1]["close"] > full_candles[-1]["open"])
+                and ((full_candles[-1]["close"] - full_candles[-1]["open"]) > max(10.0, current_price * 0.0012))
             )
 
             if hit_sl or (vwap_breakout and sharp_green_candle):
