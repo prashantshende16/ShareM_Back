@@ -255,10 +255,10 @@ class AngelOneService:
         cache_key = f"{token_info['exchange']}_{token_info['symboltoken']}_{interval}"
         now_ts = time.time()
 
-        # Check in-memory candle cache (valid for 30s)
+        # Check in-memory candle cache (valid for 5s)
         cached = cls._candle_cache.get(cache_key)
         result_candles = None
-        if cached and (now_ts - cached.get("time", 0)) < 30:
+        if cached and (now_ts - cached.get("time", 0)) < 5:
             result_candles = dict(cached["data"])
 
         if not result_candles:

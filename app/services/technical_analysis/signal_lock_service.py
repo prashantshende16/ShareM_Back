@@ -67,7 +67,12 @@ class SignalLockService:
     CONFIRM_CANDLES = 2
     MAX_LOCK_MINUTES = 30
 
+    FAST_GAP = 40           # live score gap needed for the fast path
+    FAST_PCT = 70
+    FAST_HOLD_SEC = 10      # live move must persist across polls for this long
+
     _locks: Dict[str, Dict[str, Any]] = {}
+    _fast: Dict[str, Dict[str, Any]] = {}
     _lock = threading.Lock()
     _journal_lock = threading.Lock()
 
@@ -113,6 +118,21 @@ class SignalLockService:
         if pp - cp >= gap and s["put_pct"] >= pct:
             return "PUT"
         return None
+
+    @classmethod
+    def _fast_trigger(cls, key: str, s_live: Dict[str, Any], s_closed: Dict[str, Any], now: float) -> Optional[str]:
+        """Return CALL/PUT when a strong live move has persisted and the last closed candle doesn't oppose it."""
+        side = cls._side(s_live, cls.FAST_GAP, cls.FAST_PCT)
+        # A closed candle that opposes the move blocks the fast path, unless the live
+        # move is extreme (2x gap) - i.e. a genuine sharp reversal we must not miss.
+        if not side or (cls._favour(s_closed, side) < 0 and cls._favour(s_live, side) < cls.FAST_GAP * 2):
+            cls._fast.pop(key, None)
+            return None
+        rec = cls._fast.get(key)
+        if not rec or rec["side"] != side:
+            cls._fast[key] = {"side": side, "first": now}
+            return None
+        return side if (now - rec["first"]) >= cls.FAST_HOLD_SEC else None
 
     @staticmethod
     def _favour(s: Dict[str, Any], direction: str) -> float:
@@ -305,6 +325,7 @@ class SignalLockService:
             "exit_price": st.get("exit_price"),
             "confidence": st.get("confidence"),
             "confirmations": cls.CONFIRM_CANDLES,
+            "entry_mode": st.get("entry_mode", "CONFIRMED"),
             "locked_at": cls._fmt(st["locked_at"]),
             "entered_at": cls._fmt(st.get("entered_at")),
             "t1_hit_at": cls._fmt(st.get("t1_hit_at")),
@@ -468,11 +489,27 @@ class SignalLockService:
             raw["signal_status"] = st["status"]
             return raw
 
-        # ---------- 3. Look for a NEW confirmed signal (2 closed candles agree)
+        # ---------- 3. Look for a NEW signal
+        #   CONFIRMED path: 2 closed candles agree (stable, slower)
+        #   FAST path     : strong live move held for >= FAST_HOLD_SEC and not opposed by
+        #                   the last closed candle (catches the moment, no candle-close wait)
         side_now = cls._side(s_now, cls.ENTER_GAP, cls.ENTER_PCT)
         side_prev = cls._side(s_prev, cls.ENTER_GAP, cls.ENTER_PCT)
+        confirmed = bool(side_now and side_now == side_prev)
 
-        if side_now and side_now == side_prev:
+        fast_side = None
+        if not confirmed:
+            s_live = indicator._evaluate_raw_signal(
+                candles, score_only=True, **base_kwargs)
+            fast_side = cls._fast_trigger(key, s_live, s_now, now)
+        else:
+            cls._fast.pop(key, None)
+
+        lock_side = side_now if confirmed else fast_side
+
+        if lock_side:
+            side_now = lock_side
+            entry_mode = "CONFIRMED" if confirmed else "FAST_LIVE"
             raw = indicator._evaluate_raw_signal(
                 candles, selected_strike=selected_strike, selected_option_type=selected_option_type,
                 forced_direction=side_now, **score_kwargs, **base_kwargs,
@@ -496,6 +533,7 @@ class SignalLockService:
                 "t2": te.get("target_2"),
                 "confidence": raw.get("confidence"),
                 "status": "PENDING_ENTRY",
+                "entry_mode": entry_mode,
                 "locked_at": now,
                 "locked_candle": closed_time,
                 "last_checked_candle": closed_time,

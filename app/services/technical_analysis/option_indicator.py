@@ -508,7 +508,7 @@ class OptionSignalIndicator:
         - every resolved signal is journaled for real win-rate tracking
         """
         from app.services.technical_analysis.signal_lock_service import SignalLockService
-        return SignalLockService.evaluate(
+        result = SignalLockService.evaluate(
             cls,
             candles=candles,
             cmp=cmp,
@@ -519,6 +519,24 @@ class OptionSignalIndicator:
             timeframe=timeframe,
             custom_lot_size=custom_lot_size,
         )
+        # Data freshness: how far behind the market is the newest candle we received?
+        try:
+            _, tf_sec = SignalLockService._tf(timeframe)
+            last_t = float(candles[-1]["time"]) if candles else 0.0
+            expected_start = int(time.time() // tf_sec) * tf_sec
+            lag = max(0, int(expected_start - last_t)) if last_t else None
+            result["data_freshness"] = {
+                "candle_lag_sec": lag,
+                "is_delayed": bool(lag and lag >= tf_sec),
+                "source": "ANGEL_ONE_LIVE" if result.get("is_live_angel_one") else "DELAYED_FALLBACK",
+                "warning": (
+                    f"Market data is ~{lag // 60} min behind. Signals may be late - check Angel One connection."
+                    if lag and lag >= tf_sec else None
+                ),
+            }
+        except Exception:
+            pass
+        return result
 
     @classmethod
     def _evaluate_raw_signal(
