@@ -13,6 +13,7 @@ from app.services.technical_analysis.option_indicator import OptionSignalIndicat
 logger = logging.getLogger(__name__)
 
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "surge_radar_history.json")
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "surge_radar_settings.json")
 
 class SurgeRadarService:
     """
@@ -25,10 +26,79 @@ class SurgeRadarService:
     _cached_suggestions: List[Dict[str, Any]] = []
     _history_records: List[Dict[str, Any]] = []
     _last_scan_epoch: float = 0.0
+    _last_diag: List[Dict[str, Any]] = []
     _unread_count: int = 0
     _last_seen_ids: set = set()
     _SCAN_CACHE_TTL = 15.0  # 15 seconds cache to stay real-time
-    MIN_PROFIT_CONFIDENCE = 80  # Strict minimum profit probability / confidence (>= 80% only)
+    # Configurable via environment: SURGE_MIN_CONFIDENCE (default 80), SURGE_MIN_PCT (default 10).
+    # Set SURGE_MIN_PCT=500 to show only explosive (+500%) surges.
+    MIN_PROFIT_CONFIDENCE = int(os.getenv("SURGE_MIN_CONFIDENCE", "80"))
+    MIN_SURGE_PCT = float(os.getenv("SURGE_MIN_PCT", "10"))
+
+    SETTINGS_UPDATED_AT: Optional[str] = None
+
+    @classmethod
+    def _passes_filters(cls, r: Dict[str, Any]) -> bool:
+        """Display filter: uses the CURRENT user-set thresholds."""
+        return (
+            (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
+            and (r.get("surge_pct") or 0) >= cls.MIN_SURGE_PCT
+        )
+
+    @classmethod
+    def _passes_confidence(cls, r: Dict[str, Any]) -> bool:
+        return (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
+
+    @classmethod
+    def get_settings(cls) -> Dict[str, Any]:
+        return {
+            "status": "success",
+            "min_surge_pct": cls.MIN_SURGE_PCT,
+            "min_confidence": cls.MIN_PROFIT_CONFIDENCE,
+            "updated_at": cls.SETTINGS_UPDATED_AT,
+        }
+
+    @classmethod
+    def _load_settings(cls):
+        """Load user-set thresholds saved by the app (override env defaults)."""
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, "r") as f:
+                    d = json.load(f)
+                cls.MIN_SURGE_PCT = float(d.get("min_surge_pct", cls.MIN_SURGE_PCT))
+                cls.MIN_PROFIT_CONFIDENCE = int(d.get("min_confidence", cls.MIN_PROFIT_CONFIDENCE))
+                cls.SETTINGS_UPDATED_AT = d.get("updated_at")
+        except Exception as e:
+            logger.warning(f"Could not load surge radar settings: {e}")
+
+    @classmethod
+    def set_settings(cls, min_surge_pct: Optional[float] = None, min_confidence: Optional[int] = None) -> Dict[str, Any]:
+        """Set the minimum surge % / confidence. New detections use it from now on; the list shows only
+        setups at or above the current values."""
+        if min_surge_pct is not None:
+            v = float(min_surge_pct)
+            if not (0 <= v <= 100000):
+                raise ValueError("min_surge_pct must be between 0 and 100000")
+            cls.MIN_SURGE_PCT = round(v, 1)
+        if min_confidence is not None:
+            c = int(min_confidence)
+            if not (0 <= c <= 100):
+                raise ValueError("min_confidence must be between 0 and 100")
+            cls.MIN_PROFIT_CONFIDENCE = c
+        ist = pytz.timezone("Asia/Kolkata")
+        cls.SETTINGS_UPDATED_AT = datetime.now(ist).strftime("%d %b %Y, %I:%M:%S %p")
+        try:
+            os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump({
+                    "min_surge_pct": cls.MIN_SURGE_PCT,
+                    "min_confidence": cls.MIN_PROFIT_CONFIDENCE,
+                    "updated_at": cls.SETTINGS_UPDATED_AT,
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save surge radar settings: {e}")
+        cls._last_scan_epoch = 0.0  # apply immediately on next request
+        return cls.get_settings()
 
     SUPPORTED_INDICES = [
         {"symbol": "NIFTY 50", "yf": "^NSEI", "lot_size": 65, "strike_step": 50},
@@ -42,19 +112,13 @@ class SurgeRadarService:
     def _load_history(cls):
         if cls._history_records:
             # Enforce >= 80% filter on any records currently in memory
-            cls._history_records = [
-                r for r in cls._history_records
-                if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
-            ]
+            cls._history_records = [r for r in cls._history_records if cls._passes_confidence(r)]
             return
         if os.path.exists(HISTORY_FILE):
             try:
                 with open(HISTORY_FILE, "r") as f:
                     raw_records = json.load(f)
-                    cls._history_records = [
-                        r for r in raw_records
-                        if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
-                    ]
+                    cls._history_records = [r for r in raw_records if cls._passes_confidence(r)]
                     for r in cls._history_records:
                         cls._last_seen_ids.add(r.get("id"))
                 return
@@ -186,10 +250,7 @@ class SurgeRadarService:
     def _save_history(cls):
         try:
             os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
-            valid_records = [
-                r for r in cls._history_records
-                if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
-            ]
+            valid_records = [r for r in cls._history_records if cls._passes_confidence(r)]
             cls._history_records = valid_records
             with open(HISTORY_FILE, "w") as f:
                 json.dump(cls._history_records[:100], f, indent=2)
@@ -289,6 +350,7 @@ class SurgeRadarService:
 
         if force_refresh or (now - cls._last_scan_epoch) >= cls._SCAN_CACHE_TTL or not cls._cached_suggestions:
             suggestions: List[Dict[str, Any]] = []
+            diag: List[Dict[str, Any]] = []
 
             for idx_info in cls.SUPPORTED_INDICES:
                 sym = idx_info["symbol"]
@@ -299,6 +361,8 @@ class SurgeRadarService:
                     # 1. Fetch 5m candle data
                     candles_data = LiveMarketService.get_candle_data(yf_sym, interval="5m", range_="1d")
                     if not candles_data or not candles_data.get("candles") or len(candles_data["candles"]) < 10:
+                        diag.append({"symbol": sym, "result": "NO_DATA",
+                                     "reason": "No candle data (market closed or Angel One / Yahoo feed not reachable)"})
                         continue
 
                     candles = candles_data["candles"]
@@ -317,16 +381,29 @@ class SurgeRadarService:
                     direction = signal.get("direction", "NEUTRAL")
                     exec_data = signal.get("trade_execution", {})
                     if not exec_data:
+                        diag.append({"symbol": sym, "result": "NO_SETUP", "reason": "No option setup available"})
                         continue
 
                     # Strict filter: only signals with confidence / profit chance >= MIN_PROFIT_CONFIDENCE (80%+)
                     conf_score = int(signal.get("confidence") or 0)
+                    if direction not in ("CALL", "PUT"):
+                        diag.append({"symbol": sym, "result": "NO_SIGNAL", "direction": direction,
+                                     "status": signal.get("signal_status"),
+                                     "reason": f"No confirmed CALL/PUT signal yet ({signal.get('signal_status') or direction})"})
+                        continue
                     if conf_score < cls.MIN_PROFIT_CONFIDENCE:
+                        diag.append({"symbol": sym, "result": "LOW_CONFIDENCE", "direction": direction,
+                                     "confidence": conf_score,
+                                     "reason": f"{direction} signal confidence {conf_score}% < {cls.MIN_PROFIT_CONFIDENCE}%"})
                         continue
 
                     # Delta computation
                     target_strike = signal.get("selected_strike") or (int(cmp // idx_info["strike_step"]) * idx_info["strike_step"])
-                    is_call = (direction == "CALL") or (direction == "SIDEWAYS" and macro["us_avg_change"] >= 0)
+                    # Only trade a real CALL or PUT signal. No bullish-bias default on sideways markets
+                    # (that previously turned every sideways scan into a CE).
+                    if direction not in ("CALL", "PUT"):
+                        continue
+                    is_call = direction == "CALL"
                     opt_type = "CE" if is_call else "PE"
 
                     dte = 2  # Current weekly near expiry default
@@ -363,15 +440,18 @@ class SurgeRadarService:
                     real_close = float(exec_data.get("day_close", 0.0) or 0.0)
                     real_open = float(exec_data.get("day_open", 0.0) or 0.0)
                     real_option_change_pct = 0.0
+                    # Signed: only an option that GAINS value counts as a surge (a falling option is not)
                     if real_close > 0 and ltp > 0:
-                        real_option_change_pct = round(abs(ltp - real_close) / real_close * 100, 1)
+                        real_option_change_pct = round(max(0.0, ltp - real_close) / real_close * 100, 1)
                     elif real_open > 0 and ltp > 0:
-                        real_option_change_pct = round(abs(ltp - real_open) / real_open * 100, 1)
+                        real_option_change_pct = round(max(0.0, ltp - real_open) / real_open * 100, 1)
 
                     # Priority 2: Multi-candle price volatility momentum scaled by option gearing
-                    c1_pct = abs(last_candle["close"] - last_candle["open"]) / max(1.0, last_candle["open"]) * 100
-                    c3_pct = abs(last_candle["close"] - candles[-3]["open"]) / max(1.0, candles[-3]["open"]) * 100
-                    c5_pct = abs(last_candle["close"] - candles[-5]["open"]) / max(1.0, candles[-5]["open"]) * 100
+                    # Directional spot move in favour of the option (up for CE, down for PE)
+                    sign = 1.0 if is_call else -1.0
+                    c1_pct = max(0.0, sign * (last_candle["close"] - last_candle["open"])) / max(1.0, last_candle["open"]) * 100
+                    c3_pct = max(0.0, sign * (last_candle["close"] - candles[-3]["open"])) / max(1.0, candles[-3]["open"]) * 100
+                    c5_pct = max(0.0, sign * (last_candle["close"] - candles[-5]["open"])) / max(1.0, candles[-5]["open"]) * 100
                     c_rng = (last_candle["high"] - last_candle["low"]) / max(1.0, last_candle["low"]) * 100
                     spot_move = max(c1_pct * 1.5, c_rng * 1.2, c3_pct, c5_pct * 0.8, 0.25)
 
@@ -383,6 +463,13 @@ class SurgeRadarService:
                         estimated_option_surge_pct = real_option_change_pct
                     else:
                         estimated_option_surge_pct = max(real_option_change_pct, synthetic_option_surge)
+
+                    # Strict filter: only explosive surges (>= MIN_SURGE_PCT, e.g. +500%)
+                    if estimated_option_surge_pct < cls.MIN_SURGE_PCT:
+                        diag.append({"symbol": sym, "result": "LOW_SURGE", "direction": direction,
+                                     "confidence": conf_score, "surge_pct": estimated_option_surge_pct,
+                                     "reason": f"{direction} {conf_score}% OK but surge +{estimated_option_surge_pct}% < +{cls.MIN_SURGE_PCT}%"})
+                        continue
 
                     # Surge tier classification
                     if estimated_option_surge_pct >= 20.0 or vol_ratio >= 2.5:
@@ -446,7 +533,20 @@ class SurgeRadarService:
                         )
                     }
 
+                    # Price at signal time (kept from first detection) + 1-lot money math
+                    prev_rec = next((r for r in cls._history_records if r.get("id") == sugg_id), None)
+                    suggestion["signal_ltp"] = (
+                        (prev_rec.get("signal_ltp") or prev_rec.get("current_ltp") or ltp) if prev_rec else ltp
+                    )
+                    suggestion["capital_required"] = round(entry * lot_size, 2)
+                    suggestion["max_risk_amount"] = round(max(0.0, entry - sl) * lot_size, 2)
+                    suggestion["target_1_profit"] = round((t1 - entry) * lot_size, 2)
+                    suggestion["target_2_profit"] = round((t2 - entry) * lot_size, 2)
+
                     suggestions.append(suggestion)
+                    diag.append({"symbol": sym, "result": "SHOWN", "direction": direction,
+                                 "confidence": conf_score, "surge_pct": estimated_option_surge_pct,
+                                 "reason": "Passed all filters"})
 
                     # Update history records
                     existing_idx = next((i for i, r in enumerate(cls._history_records) if r["id"] == sugg_id), None)
@@ -460,18 +560,17 @@ class SurgeRadarService:
 
                 except Exception as e:
                     logger.warning(f"Error scanning surge radar for {sym}: {e}")
+                    diag.append({"symbol": sym, "result": "ERROR", "reason": f"Scan error: {e}"})
 
             cls._cached_suggestions = suggestions
+            cls._last_diag = diag
             cls._last_scan_epoch = now
             cls._save_history()
 
         # Build available dates list from all historical + current records (strictly >= MIN_PROFIT_CONFIDENCE)
-        all_pool = [
-            r for r in cls._history_records
-            if (r.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE
-        ]
+        all_pool = [r for r in cls._history_records if cls._passes_filters(r)]
         for s in cls._cached_suggestions:
-            if (s.get("confidence_score") or 0) >= cls.MIN_PROFIT_CONFIDENCE:
+            if cls._passes_filters(s):
                 if not any(r["id"] == s["id"] for r in all_pool):
                     all_pool.insert(0, s)
 
@@ -519,6 +618,8 @@ class SurgeRadarService:
             "status": "success",
             "macro_radar": macro,
             "min_confidence": cls.MIN_PROFIT_CONFIDENCE,
+            "min_surge_pct": cls.MIN_SURGE_PCT,
+            "scan_diagnostics": cls._last_diag,
             "selected_date": active_filter,
             "today_date": today_str,
             "available_dates": available_dates,
@@ -534,3 +635,6 @@ class SurgeRadarService:
         """Marks all active surge alerts as viewed."""
         cls._unread_count = 0
         return {"status": "success", "unread_alerts_count": 0}
+
+
+SurgeRadarService._load_settings()

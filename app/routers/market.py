@@ -53,6 +53,31 @@ def get_surge_radar(date: Optional[str] = Query(default=None), force: bool = Fal
     from app.services.technical_analysis.surge_radar_service import SurgeRadarService
     return SurgeRadarService.scan_surge_radar(date_filter=date, force_refresh=force)
 
+class SurgeRadarSettingsRequest(BaseModel):
+    min_surge_pct: Optional[float] = None
+    min_confidence: Optional[int] = None
+
+
+@router.get("/surge-radar/settings")
+def get_surge_radar_settings():
+    """Current minimum surge % and confidence used by the Rapid Surge Trade Radar."""
+    from app.services.technical_analysis.surge_radar_service import SurgeRadarService
+    return SurgeRadarService.get_settings()
+
+
+@router.post("/surge-radar/settings")
+def update_surge_radar_settings(payload: SurgeRadarSettingsRequest):
+    """
+    Set the minimum surge % (e.g. 250 or 800) and/or minimum confidence.
+    New detections use it from now on and the list shows only setups at or above it.
+    """
+    from app.services.technical_analysis.surge_radar_service import SurgeRadarService
+    try:
+        return SurgeRadarService.set_settings(payload.min_surge_pct, payload.min_confidence)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/surge-radar/reset-notifications")
 def reset_surge_radar_notifications():
     """
