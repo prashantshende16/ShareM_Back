@@ -1,5 +1,5 @@
 {
-  "min_surge_pct": 10.0,
+  "min_surge_pct": 50.0,
   "min_confidence": 80,
-  "updated_at": "09 Nov 2026, 03:01:22 PM"
+  "updated_at": "12 Nov 2026, 11:55:48 AM"
 }
