@@ -13,6 +13,7 @@ from app.models import TradePosition
 from app.services.market_data.angel_one_service import AngelOneService
 from app.services.market_data.live_market_service import LiveMarketService
 from app.services.technical_analysis.option_indicator import OptionSignalIndicator
+from app.services.market_data.contract_search_service import ContractSearchService
 
 router = APIRouter(prefix="/trades", tags=["trades"])
 
@@ -47,6 +48,53 @@ class OneClickBatchRequest(BaseModel):
 
 class TrailSLRequest(BaseModel):
     new_stop_loss: Optional[float] = None
+
+
+@router.get("/search-options")
+def search_option_contracts(
+    query: str = Query(default="56000", description="Strike or Index Search e.g. 56000, 76000, BANKNIFTY"),
+    option_type: Optional[str] = Query(default=None, description="Filter: CE or PE"),
+    limit: int = Query(default=40, ge=1, le=100)
+):
+    """
+    Search and retrieve live derivative contracts across Indian Indices (NIFTY, BANK NIFTY, SENSEX, FINNIFTY, MIDCPNIFTY).
+    Supports numeric searches (56000, 76000, 25000) and contract names.
+    """
+    results = ContractSearchService.search_options(query=query, option_type_filter=option_type, limit=limit)
+    return {
+        "status": "success",
+        "query": query,
+        "count": len(results),
+        "contracts": results
+    }
+
+
+@router.get("/contract-quote")
+def get_contract_quote(
+    symbol: str = Query(default="BANK NIFTY"),
+    strike: int = Query(default=56000),
+    option_type: str = Query(default="CE"),
+    expiry: Optional[str] = Query(default=None),
+    tradingsymbol: Optional[str] = Query(default=None),
+    symboltoken: Optional[str] = Query(default=None),
+    exchange: Optional[str] = Query(default="NFO")
+):
+    """
+    Get live quote and lot pricing for an individual option contract.
+    """
+    quote_data = ContractSearchService.get_contract_quote(
+        symbol=symbol,
+        strike=strike,
+        option_type=option_type,
+        expiry=expiry,
+        tradingsymbol=tradingsymbol,
+        symboltoken=symboltoken,
+        exchange=exchange
+    )
+    return {
+        "status": "success",
+        "data": quote_data
+    }
 
 
 @router.get("/profile-margin")
