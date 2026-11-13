@@ -193,7 +193,8 @@ class ContractSearchService:
     @classmethod
     def estimate_option_premium(cls, spot: float, strike: float, option_type: str, dte: int = 4) -> Dict[str, float]:
         """
-        Calculates realistic option premium with Black-Scholes aligned intrinsic + time value decay.
+        Calculates realistic option premium with Black-Scholes aligned intrinsic + percentage distance decay.
+        Works accurately across NIFTY (25k), BANK NIFTY (52k), and SENSEX (82k).
         """
         opt = option_type.upper().strip()
         if opt == "CE":
@@ -203,15 +204,16 @@ class ContractSearchService:
             intrinsic = max(0.0, strike - spot)
             dist_pts = spot - strike  # positive if OTM
 
-        # ATM baseline straddle volatility factor based on DTE
+        # ATM baseline straddle volatility factor based on DTE (~0.7% of spot)
         atm_val = spot * 0.007 * max(0.3, (max(1, dte) / 5.0) ** 0.5)
 
         if dist_pts <= 0:
             # In-The-Money (ITM)
             extrinsic = atm_val * max(0.05, 1.0 - (abs(dist_pts) / max(1.0, spot * 0.06)))
         else:
-            # Out-Of-The-Money (OTM): decays exponentially with distance from spot
-            decay = 2.71828 ** (- (dist_pts / 195.0))
+            # Out-Of-The-Money (OTM): percentage decay normalized by spot!
+            pct_dist = (dist_pts / spot) * 100.0  # e.g. 2.4% OTM
+            decay = 2.71828 ** (- (pct_dist / 1.05))
             extrinsic = atm_val * decay
 
         premium = round(max(0.5, intrinsic + extrinsic), 1)
@@ -363,6 +365,29 @@ class ContractSearchService:
                             "spot_cmp": cmp,
                         }
                         results.append(item)
+
+        # Batch fetch live tick LTP from Angel One in ONE single call for all valid tokens
+        try:
+            if AngelOneService and AngelOneService.is_configured():
+                tokens_by_exchange = {}
+                for item in results:
+                    tok = str(item.get("symboltoken", ""))
+                    if tok and not tok.startswith("SIM_"):
+                        ex = item.get("exchange", "NFO")
+                        tokens_by_exchange.setdefault(ex, []).append(tok)
+
+                if tokens_by_exchange:
+                    batch_quotes = AngelOneService.get_batch_ltp_sync(tokens_by_exchange)
+                    if batch_quotes:
+                        for item in results:
+                            tok = str(item.get("symboltoken", ""))
+                            ts = item.get("tradingsymbol", "")
+                            live_p = batch_quotes.get(tok) or batch_quotes.get(ts)
+                            if live_p and live_p > 0:
+                                item["ltp"] = round(live_p, 2)
+                                item["capital_1_lot"] = round(live_p * item["lot_size"], 2)
+        except Exception as e:
+            logger.debug(f"Batch quote update error: {e}")
 
         # Sort: exact strike match first, then by earliest expiry, then CE then PE
         def sort_key(x):

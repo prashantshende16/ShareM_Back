@@ -1,5 +1,27 @@
 [
   {
+    "id": "MIDCPNIFTY_5m_CALL_1794564000",
+    "symbol": "MIDCPNIFTY",
+    "timeframe": "5m",
+    "direction": "CALL",
+    "contract": "MIDCPNIFTY23NOV2614350CE - MIDCPNIFTY 23 NOV 2026 14350 CE",
+    "strike": 14350,
+    "option_type": "CE",
+    "confidence": 82,
+    "entry": 181.7,
+    "stop_loss": 159.9,
+    "target_1": 234.0,
+    "target_2": 264.5,
+    "exit_price": 122.3,
+    "status": "CANCELLED",
+    "result": "NO_TRADE",
+    "pnl_points": 0.0,
+    "pnl_amount": 0.0,
+    "locked_at": "2026-11-13T15:39:40.424182+05:30",
+    "resolved_at": "2026-11-13T15:39:57.479749+05:30",
+    "date": "2026-11-13"
+  },
+  {
     "id": "SENSEX_5m_CALL_1794563700",
     "symbol": "SENSEX",
     "timeframe": "5m",
