@@ -485,11 +485,102 @@ class SurgeRadarService:
                         surge_badge = f"✨ +{estimated_option_surge_pct}% Momentum"
                         is_hot = False
 
-                    # Unique Suggestion ID per 15-minute window
-                    slot_id = int(now // 600)
-                    sugg_id = f"SURGE_{sym.replace(' ', '')}_{target_strike}_{opt_type}_{slot_id}"
+                    # Check if an existing setup for this underlying + option_type exists today
+                    # Hysteresis: match exact strike, or adjacent strike within 1 strike step if detected recently (< 45 mins)
+                    # to prevent strike-flipping jitter around ATM boundaries
+                    existing_idx = None
+                    existing_rec = None
 
-                    detected_time_str = now_ist.strftime("%I:%M:%S %p")
+                    for i, r in enumerate(cls._history_records):
+                        if (
+                            r.get("symbol") == sym
+                            and r.get("option_type") == opt_type
+                            and r.get("detected_date") == today_str
+                        ):
+                            try:
+                                strike_diff = abs(int(r.get("strike_price", 0)) - int(target_strike))
+                            except (TypeError, ValueError):
+                                strike_diff = 999999
+
+                            rec_age_sec = now - float(r.get("detected_timestamp", 0) or 0)
+                            if strike_diff == 0 and rec_age_sec < 14400:  # within 4 hours
+                                existing_idx = i
+                                existing_rec = r
+                                break
+                            elif strike_diff <= idx_info["strike_step"] and rec_age_sec < 2700:  # within 45 mins
+                                # Anchor to existing strike to stop strike-flipping jitter
+                                target_strike = int(r.get("strike_price"))
+                                existing_idx = i
+                                existing_rec = r
+                                break
+
+                    # If existing setup is matched, fetch live LTP for the anchored strike
+                    if existing_rec:
+                        try:
+                            from app.services.market_data.angel_one_service import AngelOneService
+                            if AngelOneService.is_configured():
+                                live_q = AngelOneService.get_option_quote_sync(
+                                    underlying=sym,
+                                    expiry_str=signal.get("active_expiry", "current"),
+                                    strike=target_strike,
+                                    option_type=opt_type
+                                )
+                                if live_q and float(live_q.get("ltp", 0.0)) > 0:
+                                    ltp = round(float(live_q["ltp"]), 1)
+                        except Exception as e:
+                            logger.debug(f"Could not refresh live quote for {sym} {target_strike} {opt_type}: {e}")
+
+                    if existing_rec:
+                        # -------------------------------------------------------------
+                        # ANCHORED SETUP STABILIZER:
+                        # Preserve original Entry, SL, Targets, ID, and Detection Time forever!
+                        # Polling updates only live LTP, PnL, and milestone status.
+                        # -------------------------------------------------------------
+                        sugg_id = existing_rec["id"]
+                        entry = float(existing_rec.get("entry_price", entry))
+                        sl = float(existing_rec.get("stop_loss", sl))
+                        t1 = float(existing_rec.get("target_1", t1))
+                        t2 = float(existing_rec.get("target_2", t2))
+                        detected_time_str = existing_rec.get("detected_time", now_ist.strftime("%I:%M:%S %p"))
+                        detected_at_str = existing_rec.get("detected_at", f"{today_label}, {detected_time_str}")
+                        detected_ts = float(existing_rec.get("detected_timestamp", now))
+                        surge_pct_val = float(existing_rec.get("surge_pct", estimated_option_surge_pct))
+                        surge_badge_val = existing_rec.get("surge_badge", surge_badge)
+                        surge_tier_val = existing_rec.get("surge_tier", surge_tier)
+                        strike_delta_val = existing_rec.get("delta", strike_delta)
+                        conf_score_val = int(existing_rec.get("confidence_score", conf_score))
+                        signal_ltp_val = float(existing_rec.get("signal_ltp", entry))
+                    else:
+                        # Brand-new setup detected: create stable anchor ID
+                        sugg_id = f"SURGE_{sym.replace(' ', '')}_{target_strike}_{opt_type}_{int(now)}"
+                        detected_time_str = now_ist.strftime("%I:%M:%S %p")
+                        detected_at_str = f"{today_label}, {detected_time_str}"
+                        detected_ts = now
+                        surge_pct_val = estimated_option_surge_pct
+                        surge_badge_val = surge_badge
+                        surge_tier_val = surge_tier
+                        strike_delta_val = strike_delta
+                        conf_score_val = conf_score
+                        signal_ltp_val = ltp
+
+                    # Determine Live Status & Real-Time Tracking
+                    if ltp >= t2:
+                        live_status = "TARGET_2_HIT"
+                        status_label = "🏆 Target 2 Hit (Full Profit)"
+                    elif ltp >= t1:
+                        live_status = "TARGET_1_HIT"
+                        status_label = "🎯 Target 1 Hit (Trailing SL)"
+                    elif ltp <= sl:
+                        live_status = "STOP_LOSS_HIT"
+                        status_label = "🛑 Stop Loss Hit"
+                    else:
+                        live_status = "ACTIVE"
+                        status_label = "🟢 Active Setup (In Play)"
+
+                    pnl_per_share = round(ltp - entry, 1)
+                    total_pnl = round(pnl_per_share * lot_size, 2)
+                    pnl_pct = round((pnl_per_share / max(0.1, entry)) * 100, 1)
+
                     suggestion = {
                         "id": sugg_id,
                         "symbol": sym,
@@ -504,18 +595,23 @@ class SurgeRadarService:
                         "lots": 1,
                         "lot_size": lot_size,
                         "total_quantity": lot_size,
-                        "surge_pct": estimated_option_surge_pct,
-                        "surge_badge": surge_badge,
-                        "surge_tier": surge_tier,
+                        "surge_pct": surge_pct_val,
+                        "surge_badge": surge_badge_val,
+                        "surge_tier": surge_tier_val,
                         "volume_ratio": vol_ratio,
-                        "delta": strike_delta,
+                        "delta": strike_delta_val,
                         "entry_price": entry,
                         "current_ltp": ltp,
+                        "signal_ltp": signal_ltp_val,
                         "stop_loss": sl,
                         "target_1": t1,
                         "target_2": t2,
+                        "live_status": live_status,
+                        "status_label": status_label,
+                        "current_pnl": total_pnl,
+                        "current_pnl_pct": pnl_pct,
                         "risk_reward": exec_data.get("risk_reward_ratio", "1:2.4"),
-                        "confidence_score": conf_score,
+                        "confidence_score": conf_score_val,
                         "macro_confluence": macro["macro_verdict"],
                         "dow_change": macro["dow_jones"]["change_pct"],
                         "nasdaq_change": macro["nasdaq"]["change_pct"],
@@ -523,33 +619,26 @@ class SurgeRadarService:
                         "detected_date": today_str,
                         "detected_date_label": today_label,
                         "detected_time": detected_time_str,
-                        "detected_at": f"{today_label}, {detected_time_str}",
-                        "detected_timestamp": now,
+                        "detected_at": detected_at_str,
+                        "detected_timestamp": detected_ts,
                         "is_hot": is_hot,
                         "summary": (
-                            f"{surge_badge} detected on {sym} {target_strike} {opt_type}! "
-                            f"Delta: {strike_delta} with {vol_ratio}x volume spike. "
-                            f"Targeting ₹{t1} (T1) and ₹{t2} (T2) with SL at ₹{sl}."
-                        )
+                            f"{surge_badge_val} detected on {sym} {target_strike} {opt_type}! "
+                            f"Delta: {strike_delta_val} with {vol_ratio}x volume spike. "
+                            f"Targeting ₹{t1} (T1) and ₹{t2} (T2) with SL at ₹{sl}. [{status_label}]"
+                        ),
+                        "capital_required": round(entry * lot_size, 2),
+                        "max_risk_amount": round(max(0.0, entry - sl) * lot_size, 2),
+                        "target_1_profit": round((t1 - entry) * lot_size, 2),
+                        "target_2_profit": round((t2 - entry) * lot_size, 2),
                     }
-
-                    # Price at signal time (kept from first detection) + 1-lot money math
-                    prev_rec = next((r for r in cls._history_records if r.get("id") == sugg_id), None)
-                    suggestion["signal_ltp"] = (
-                        (prev_rec.get("signal_ltp") or prev_rec.get("current_ltp") or ltp) if prev_rec else ltp
-                    )
-                    suggestion["capital_required"] = round(entry * lot_size, 2)
-                    suggestion["max_risk_amount"] = round(max(0.0, entry - sl) * lot_size, 2)
-                    suggestion["target_1_profit"] = round((t1 - entry) * lot_size, 2)
-                    suggestion["target_2_profit"] = round((t2 - entry) * lot_size, 2)
 
                     suggestions.append(suggestion)
                     diag.append({"symbol": sym, "result": "SHOWN", "direction": direction,
-                                 "confidence": conf_score, "surge_pct": estimated_option_surge_pct,
+                                 "confidence": conf_score_val, "surge_pct": surge_pct_val,
                                  "reason": "Passed all filters"})
 
-                    # Update history records
-                    existing_idx = next((i for i, r in enumerate(cls._history_records) if r["id"] == sugg_id), None)
+                    # Update history records stably
                     if existing_idx is not None:
                         cls._history_records[existing_idx] = suggestion
                     else:
