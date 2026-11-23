@@ -646,6 +646,12 @@ class SurgeRadarService:
                         if sugg_id not in cls._last_seen_ids:
                             cls._last_seen_ids.add(sugg_id)
                             cls._unread_count += 1
+                            # Dispatch Push Notification to Flutter mobile app
+                            try:
+                                from app.services.notifications.push_notification_service import PushNotificationService
+                                PushNotificationService.send_surge_radar_notification(suggestion)
+                            except Exception as notif_err:
+                                logger.warning(f"Could not dispatch FCM surge notification: {notif_err}")
 
                 except Exception as e:
                     logger.warning(f"Error scanning surge radar for {sym}: {e}")
